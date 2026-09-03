@@ -1,0 +1,7 @@
+ca-*
+logs
+servers
+users
+state.json
+state.lock
+.last_session
