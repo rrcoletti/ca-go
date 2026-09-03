@@ -1,18 +1,21 @@
 package main
 
-// ca-go v1.0
+// ca-go - CA manager: Go TUI front end and CA engine.
 //
-// Run without arguments for the TUI (operates on the current directory),
-// or use the CLI subcommands for scripting (passwords via environment
-// variables, never on the command line):
+// Run without arguments for the TUI (operates on the configured CA
+// directory, default ~/ca-go), or use the CLI subcommands for scripting
+// (passwords via environment variables, never on the command line):
 //
-//   ca-go new-ca                        ROOT_PASS, SIGN_PASS
-//   ca-go server <fqdn>                 SIGN_PASS, P12_PASS (optional)
-//   ca-go user <cn> <email>             USER_PASS, SIGN_PASS, P12_PASS (optional)
-//   ca-go revoke-server <fqdn>          SIGN_PASS
-//   ca-go revoke-user <email>           SIGN_PASS
-//   ca-go crl                           SIGN_PASS
+//   ca-go new-ca                        CAGO_ROOT_PASS, CAGO_SIGN_PASS
+//   ca-go server <fqdn>                 CAGO_SIGN_PASS, CAGO_P12_PASS (optional)
+//   ca-go user <cn> <email>             CAGO_USER_PASS, CAGO_SIGN_PASS, CAGO_P12_PASS (optional)
+//   ca-go revoke-server <fqdn>          CAGO_SIGN_PASS
+//   ca-go revoke-user <email>           CAGO_SIGN_PASS
+//   ca-go crl                           CAGO_SIGN_PASS
 //   ca-go show
+//
+// Settings (CA directory, organization, CA subject names)
+// live in ~/.config/ca-go/ca-go.conf; on first run the TUI asks for them.
 
 import (
   "fmt"
@@ -27,6 +30,9 @@ func fail(err error) {
 }
 
 func main() {
+  if err := loadConf(); err != nil {
+    fail(err)
+  }
   args := os.Args[1:]
   if len(args) == 0 {
     p := tea.NewProgram(initialModel(), tea.WithAltScreen())
@@ -39,21 +45,21 @@ func main() {
   var err error
   switch args[0] {
   case "new-ca":
-    _, err = NewCA(os.Getenv("ROOT_PASS"), os.Getenv("SIGN_PASS"))
+    _, err = NewCA(os.Getenv(envRootPass), os.Getenv(envSignPass))
   case "server":
     need(len(args) == 2, "usage: ca-go server <fqdn>")
-    _, err = IssueServer(args[1], os.Getenv("SIGN_PASS"), os.Getenv("P12_PASS"))
+    _, err = IssueServer(args[1], os.Getenv(envSignPass), os.Getenv(envP12Pass))
   case "user":
     need(len(args) == 3, "usage: ca-go user <cn> <email>")
-    _, err = IssueUser(args[1], args[2], os.Getenv("USER_PASS"), os.Getenv("SIGN_PASS"), os.Getenv("P12_PASS"))
+    _, err = IssueUser(args[1], args[2], os.Getenv(envUserPass), os.Getenv(envSignPass), os.Getenv(envP12Pass))
   case "revoke-server":
     need(len(args) == 2, "usage: ca-go revoke-server <fqdn>")
-    _, err = Revoke("server", args[1], os.Getenv("SIGN_PASS"))
+    _, err = Revoke("server", args[1], os.Getenv(envSignPass))
   case "revoke-user":
     need(len(args) == 2, "usage: ca-go revoke-user <email>")
-    _, err = Revoke("user", args[1], os.Getenv("SIGN_PASS"))
+    _, err = Revoke("user", args[1], os.Getenv(envSignPass))
   case "crl":
-    _, err = RegenerateCRL(os.Getenv("SIGN_PASS"))
+    _, err = RegenerateCRL(os.Getenv(envSignPass))
   case "show":
     recs, e := ListIssued()
     if e != nil {

@@ -8,7 +8,7 @@ import "os"
 // reason for the single-user homelab use case.
 
 func lockState() (*os.File, error) {
-  return os.OpenFile(stateLockPath, os.O_CREATE|os.O_RDWR, 0600)
+  return os.OpenFile(stateLockPath(), os.O_CREATE|os.O_RDWR, 0600)
 }
 
 func unlockState(f *os.File) {
