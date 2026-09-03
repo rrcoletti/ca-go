@@ -1,4 +1,4 @@
-module casinha/ca-go
+module ca-go
 
 go 1.23.0
 

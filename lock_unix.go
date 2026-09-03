@@ -10,7 +10,7 @@ import (
 )
 
 func lockState() (*os.File, error) {
-  f, err := os.OpenFile(stateLockPath, os.O_CREATE|os.O_RDWR, 0600)
+  f, err := os.OpenFile(stateLockPath(), os.O_CREATE|os.O_RDWR, 0600)
   if err != nil {
     return nil, err
   }

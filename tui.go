@@ -6,6 +6,7 @@ package main
 import (
   "fmt"
   "os"
+  "path/filepath"
   "strings"
 
   "github.com/charmbracelet/bubbles/textinput"
@@ -34,6 +35,8 @@ const (
   actUser
   actRevokeUser
   actShow
+  actSettings
+  actSetup
 )
 
 var menuItems = []string{
@@ -44,6 +47,7 @@ var menuItems = []string{
   "New user certificate",
   "Revoke user certificate",
   "Show issued certificates",
+  "Edit configuration",
   "Quit",
 }
 
@@ -79,7 +83,25 @@ type model struct {
 }
 
 func initialModel() model {
-  return model{screen: scrMenu}
+  m := model{screen: scrMenu}
+  if !identityConfigured() {
+    // first run: setup form (org, CNs, directory)
+    m.screen = scrForm
+    m.action = actSetup
+    m.focus = 0
+    defs := []struct{ label, val string }{
+      {"Organization", ""},
+      {"Root CA CN", ""},
+      {"Signing CA CN", ""},
+      {"CA directory", baseDir},
+    }
+    for _, d := range defs {
+      f := newField(d.label, "", false)
+      f.input.SetValue(d.val)
+      m.fields = append(m.fields, f)
+    }
+  }
+  return m
 }
 
 func newField(label, placeholder string, masked bool) field {
@@ -116,12 +138,12 @@ func (m model) startForm(act action) (tea.Model, tea.Cmd) {
   case actCRL:
     add("Signing CA passphrase", "", true)
   case actServer:
-    add("FQDN (e.g. dock.casinha.wro)", "", false)
+    add("FQDN (e.g. host.example.com)", "", false)
     add("Signing CA passphrase", "", true)
     add("p12 export passphrase (empty = none)", "", true)
   case actUser:
-    add("Common name (e.g. rcoletti)", "", false)
-    add("Email (name@domain)", "", false)
+    add("Common name (e.g. User Name)", "", false)
+    add("Email (e.g. name@example.com)", "", false)
     add("User passphrase", "", true)
     add("Confirm user passphrase", "", true)
     add("Signing CA passphrase", "", true)
@@ -200,7 +222,7 @@ func (m model) submitForm() (model, tea.Cmd) {
       return m, nil
     }
     if !validEmail(vals[1]) {
-      m.errMsg = "email must be in the format name@domain"
+      m.errMsg = "email must be in the format name@example.com"
       return m, nil
     }
     if vals[2] == "" || vals[2] != vals[3] {
@@ -214,6 +236,48 @@ func (m model) submitForm() (model, tea.Cmd) {
   }
   if act == actServer && vals[0] == "" {
     m.errMsg = "fqdn must not be empty"
+    return m, nil
+  }
+  if act == actSettings {
+    for i, label := range []string{"organization", "root CA CN", "signing CA CN"} {
+      if vals[i] == "" {
+        m.errMsg = label + " must not be empty"
+        return m, nil
+      }
+    }
+    if !filepath.IsAbs(vals[3]) {
+      m.errMsg = "directory must be an absolute path"
+      return m, nil
+    }
+    orgName, rootCN, signCN = vals[0], vals[1], vals[2]
+    baseDir = vals[3]
+    if err := saveConf(); err != nil {
+      m.errMsg = err.Error()
+      return m, nil
+    }
+    m.screen = scrResult
+    m.lines = []string{"Configuration saved."}
+    return m, nil
+  }
+  if act == actSetup {
+    for i, label := range []string{"organization", "root CA CN", "signing CA CN"} {
+      if vals[i] == "" {
+        m.errMsg = label + " must not be empty"
+        return m, nil
+      }
+    }
+    if !filepath.IsAbs(vals[3]) {
+      m.errMsg = "directory must be an absolute path"
+      return m, nil
+    }
+    orgName, rootCN, signCN = vals[0], vals[1], vals[2]
+    baseDir = vals[3]
+    if err := saveConf(); err != nil {
+      m.errMsg = err.Error()
+      return m, nil
+    }
+    m.screen = scrResult
+    m.lines = []string{"Configuration saved."}
     return m, nil
   }
 
@@ -353,9 +417,32 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
       act = actUser
     case 5:
       act = actRevokeUser
+    case 6:
+      act = actShow
+    case 7:
+      act = actSettings
+    }
+    if act == actSettings {
+      // prefilled 4-field form for the full configuration
+      m.screen = scrForm
+      m.action = actSettings
+      m.focus = 0
+      m.errMsg = ""
+      defs := []struct{ label, val string }{
+        {"Organization", orgName},
+        {"Root CA CN", rootCN},
+        {"Signing CA CN", signCN},
+        {"CA directory", baseDir},
+      }
+      for _, d := range defs {
+        f := newField(d.label, "", false)
+        f.input.SetValue(d.val)
+        m.fields = append(m.fields, f)
+      }
+      return m, textinput.Blink
     }
     if act == actNewCA {
-      if _, err := os.Stat(signCertPath); err == nil {
+      if _, err := os.Stat(signCertPath()); err == nil {
         m.screen = scrResult
         m.errMsg = "CA already exists in this directory"
         return m, nil
@@ -489,7 +576,7 @@ func (m model) renderPick() string {
 
 // frame renders the title and the screen content.
 func (m model) frame(content string) string {
-  return titleStyle.Render("Casinha CA Manager") + "\n\n" + content
+  return titleStyle.Render("ca-go") + "\n\n" + content
 }
 
 func (m model) View() string {
