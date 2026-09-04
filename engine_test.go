@@ -63,20 +63,20 @@ func TestConfRoundTrip(t *testing.T) {
   }
 
   // save, then load back
-  orgName, rootCN, signCN = "Example", "Example Root CA", "Example Sign CA"
+  orgName, rootCN = "Example", "Example Root CA"
   baseDir = "/data/my-ca"
   if err := saveConf(); err != nil {
     t.Fatal(err)
   }
-  orgName, rootCN, signCN = "", "", ""
+  orgName, rootCN = "", ""
   baseDir = "/somewhere/else"
   if err := loadConf(); err != nil {
     t.Fatal(err)
   }
   if baseDir != "/data/my-ca" || orgName != "Example" ||
-    rootCN != "Example Root CA" || signCN != "Example Sign CA" {
-    t.Fatalf("round trip mismatch: dir=%q org=%q root=%q sign=%q",
-      baseDir, orgName, rootCN, signCN)
+    rootCN != "Example Root CA" {
+    t.Fatalf("round trip mismatch: dir=%q org=%q root=%q",
+      baseDir, orgName, rootCN)
   }
   if !identityConfigured() {
     t.Fatal("identity should be configured after load")
@@ -94,11 +94,11 @@ func TestIssueRefusesIdentityMismatch(t *testing.T) {
   oldBase := baseDir
   baseDir = t.TempDir()
   t.Cleanup(func() { baseDir = oldBase })
-  oldOrg, oldRoot, oldSign := orgName, rootCN, signCN
-  orgName, rootCN, signCN = "Example", "Example Root CA", "Example Sign CA"
-  t.Cleanup(func() { orgName, rootCN, signCN = oldOrg, oldRoot, oldSign })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
 
-  if _, err := NewCA("rp", "sp"); err != nil {
+  if _, err := NewCA("rp"); err != nil {
     t.Fatal(err)
   }
 
@@ -107,7 +107,7 @@ func TestIssueRefusesIdentityMismatch(t *testing.T) {
   if err != nil {
     t.Fatal(err)
   }
-  _, err = IssueServer("host.example.com", "sp", "")
+  _, err = IssueServer("host.example.com", "rp", "")
   if err == nil {
     t.Fatal("expected refusal on identity mismatch")
   }
@@ -126,7 +126,7 @@ func TestIssueRefusesIdentityMismatch(t *testing.T) {
   }
 
   orgName = "Example"
-  if _, err := IssueServer("host.example.com", "sp", ""); err != nil {
+  if _, err := IssueServer("host.example.com", "rp", ""); err != nil {
     t.Fatalf("issue with consistent identity failed: %v", err)
   }
 }
@@ -136,11 +136,11 @@ func TestIssueWithoutCA(t *testing.T) {
   oldBase := baseDir
   baseDir = t.TempDir()
   t.Cleanup(func() { baseDir = oldBase })
-  oldOrg, oldRoot, oldSign := orgName, rootCN, signCN
-  orgName, rootCN, signCN = "Example", "Example Root CA", "Example Sign CA"
-  t.Cleanup(func() { orgName, rootCN, signCN = oldOrg, oldRoot, oldSign })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
 
-  _, err := IssueServer("host.example.com", "sp", "")
+  _, err := IssueServer("host.example.com", "rp", "")
   if err == nil || !strings.Contains(err.Error(), "no CA exists") {
     t.Fatalf("expected 'no CA exists' error, got: %v", err)
   }
@@ -164,17 +164,17 @@ func TestWrapText(t *testing.T) {
   }
 }
 
-// A wrong signing passphrase must fail before anything is written, with
+// A wrong CA passphrase must fail before anything is written, with
 // a short user-facing message; full detail goes to logs/ca-go.log.
-func TestWrongSignPassWritesNothing(t *testing.T) {
+func TestWrongCAPassWritesNothing(t *testing.T) {
   oldBase := baseDir
   baseDir = t.TempDir()
   t.Cleanup(func() { baseDir = oldBase })
-  oldOrg, oldRoot, oldSign := orgName, rootCN, signCN
-  orgName, rootCN, signCN = "Example", "Example Root CA", "Example Sign CA"
-  t.Cleanup(func() { orgName, rootCN, signCN = oldOrg, oldRoot, oldSign })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
 
-  if _, err := NewCA("rp", "sp"); err != nil {
+  if _, err := NewCA("rp"); err != nil {
     t.Fatal(err)
   }
 
@@ -202,7 +202,7 @@ func TestWrongSignPassWritesNothing(t *testing.T) {
   }
 
   // correct passphrase still issues fine afterwards
-  if _, err := IssueServer("host.example.com", "sp", ""); err != nil {
+  if _, err := IssueServer("host.example.com", "rp", ""); err != nil {
     t.Fatalf("issuance with correct passphrase failed: %v", err)
   }
 }
@@ -213,37 +213,37 @@ func TestUserDuplicateGuards(t *testing.T) {
   oldBase := baseDir
   baseDir = t.TempDir()
   t.Cleanup(func() { baseDir = oldBase })
-  oldOrg, oldRoot, oldSign := orgName, rootCN, signCN
-  orgName, rootCN, signCN = "Example", "Example Root CA", "Example Sign CA"
-  t.Cleanup(func() { orgName, rootCN, signCN = oldOrg, oldRoot, oldSign })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
 
-  if _, err := NewCA("rp", "sp"); err != nil {
+  if _, err := NewCA("rp"); err != nil {
     t.Fatal(err)
   }
-  if _, err := IssueUser("User Name", "user@example.com", "up", "sp", ""); err != nil {
+  if _, err := IssueUser("User Name", "user@example.com", "up", "rp", ""); err != nil {
     t.Fatal(err)
   }
 
   // same CN (and email): refused, CN reported first
-  _, err := IssueUser("User Name", "user@example.com", "up", "sp", "")
+  _, err := IssueUser("User Name", "user@example.com", "up", "rp", "")
   if err == nil || !strings.Contains(err.Error(), "common name") {
     t.Fatalf("expected duplicate-CN refusal, got: %v", err)
   }
   // same email, different CN: refused on the email
-  _, err = IssueUser("User Name 2", "user@example.com", "up", "sp", "")
+  _, err = IssueUser("User Name 2", "user@example.com", "up", "rp", "")
   if err == nil || !strings.Contains(err.Error(), "for user@example.com already exists") {
     t.Fatalf("expected duplicate-email refusal, got: %v", err)
   }
 
   // revoking renames the artifacts away and frees the identity
-  if _, err := Revoke("user", "user@example.com", "sp"); err != nil {
+  if _, err := Revoke("user", "user@example.com", "rp"); err != nil {
     t.Fatal(err)
   }
   if _, e := os.Stat(filepath.Join(baseDir, "users/certs/user@example.com.crt")); !os.IsNotExist(e) {
     t.Fatal("revoked cert still under its live name")
   }
   checkRevokedArtifacts(t, baseDir, "user@example.com")
-  if _, err := IssueUser("User Name", "user@example.com", "up", "sp", ""); err != nil {
+  if _, err := IssueUser("User Name", "user@example.com", "up", "rp", ""); err != nil {
     t.Fatalf("reissue after revocation should work: %v", err)
   }
 }
@@ -285,25 +285,25 @@ func TestServerReissueAfterRevocation(t *testing.T) {
   oldBase := baseDir
   baseDir = t.TempDir()
   t.Cleanup(func() { baseDir = oldBase })
-  oldOrg, oldRoot, oldSign := orgName, rootCN, signCN
-  orgName, rootCN, signCN = "Example", "Example Root CA", "Example Sign CA"
-  t.Cleanup(func() { orgName, rootCN, signCN = oldOrg, oldRoot, oldSign })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
 
-  if _, err := NewCA("rp", "sp"); err != nil {
+  if _, err := NewCA("rp"); err != nil {
     t.Fatal(err)
   }
-  if _, err := IssueServer("host.example.com", "sp", ""); err != nil {
+  if _, err := IssueServer("host.example.com", "rp", ""); err != nil {
     t.Fatal(err)
   }
-  _, err := IssueServer("host.example.com", "sp", "")
+  _, err := IssueServer("host.example.com", "rp", "")
   if err == nil || !strings.Contains(err.Error(), "already exists") {
     t.Fatalf("expected duplicate refusal, got: %v", err)
   }
-  if _, err := Revoke("server", "host.example.com", "sp"); err != nil {
+  if _, err := Revoke("server", "host.example.com", "rp"); err != nil {
     t.Fatal(err)
   }
   checkRevokedArtifacts(t, baseDir, "host.example.com")
-  if _, err := IssueServer("host.example.com", "sp", ""); err != nil {
+  if _, err := IssueServer("host.example.com", "rp", ""); err != nil {
     t.Fatalf("reissue after revocation should work: %v", err)
   }
   // state keeps the revoked record and adds the new one
@@ -322,7 +322,7 @@ func TestServerReissueAfterRevocation(t *testing.T) {
   }
   // revoking the reissued cert must work too, despite the older revoked
   // record for the same FQDN
-  if _, err := Revoke("server", "host.example.com", "sp"); err != nil {
+  if _, err := Revoke("server", "host.example.com", "rp"); err != nil {
     t.Fatalf("second revocation failed: %v", err)
   }
   recs, err = ListIssued()
@@ -363,12 +363,12 @@ func TestShortSuccessMessages(t *testing.T) {
   oldBase := baseDir
   baseDir = t.TempDir()
   t.Cleanup(func() { baseDir = oldBase })
-  oldOrg, oldRoot, oldSign := orgName, rootCN, signCN
-  orgName, rootCN, signCN = "Example", "Example Root CA", "Example Sign CA"
-  t.Cleanup(func() { orgName, rootCN, signCN = oldOrg, oldRoot, oldSign })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
 
   want := []string{"CA created", "", "See 'logs/ca-go.log' in the CA directory for details"}
-  lines, err := NewCA("rp", "sp")
+  lines, err := NewCA("rp")
   if err != nil {
     t.Fatal(err)
   }
@@ -377,7 +377,7 @@ func TestShortSuccessMessages(t *testing.T) {
   }
 
   want = []string{"certificate for host.example.com issued", "", "See 'logs/ca-go.log' in the CA directory for details"}
-  lines, err = IssueServer("host.example.com", "sp", "")
+  lines, err = IssueServer("host.example.com", "rp", "")
   if err != nil {
     t.Fatal(err)
   }
@@ -385,12 +385,52 @@ func TestShortSuccessMessages(t *testing.T) {
     t.Fatalf("IssueServer lines = %q, want %q", lines, want)
   }
 
+  want = []string{"certificate for user@example.com issued", "", "See 'logs/ca-go.log' in the CA directory for details"}
+  lines, err = IssueUser("User Name", "user@example.com", "up", "rp", "")
+  if err != nil {
+    t.Fatal(err)
+  }
+  if strings.Join(lines, "|") != strings.Join(want, "|") {
+    t.Fatalf("IssueUser lines = %q, want %q", lines, want)
+  }
+
   want = []string{"CRL regenerated", "", "See 'logs/ca-go.log' in the CA directory for details"}
-  lines, err = RegenerateCRL("sp")
+  lines, err = RegenerateCRL("rp")
   if err != nil {
     t.Fatal(err)
   }
   if strings.Join(lines, "|") != strings.Join(want, "|") {
     t.Fatalf("RegenerateCRL lines = %q, want %q", lines, want)
+  }
+}
+
+// Revoking or regenerating the CRL without a CA must fail with the
+// friendly message (not a raw os error) and must not create anything.
+func TestRevokeAndCRLWithoutCA(t *testing.T) {
+  oldBase := baseDir
+  baseDir = t.TempDir()
+  t.Cleanup(func() { baseDir = oldBase })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
+
+  _, err := Revoke("server", "host.example.com", "rp")
+  if err == nil || !strings.Contains(err.Error(), "no CA exists") {
+    t.Fatalf("expected 'no CA exists' error, got: %v", err)
+  }
+  _, err = RegenerateCRL("rp")
+  if err == nil || !strings.Contains(err.Error(), "no CA exists") {
+    t.Fatalf("expected 'no CA exists' error, got: %v", err)
+  }
+  entries, err := os.ReadDir(baseDir)
+  if err != nil {
+    t.Fatal(err)
+  }
+  if len(entries) != 0 {
+    var names []string
+    for _, e := range entries {
+      names = append(names, e.Name())
+    }
+    t.Fatalf("failing calls must not create anything, got %v", names)
   }
 }

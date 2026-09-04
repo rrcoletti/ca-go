@@ -6,12 +6,12 @@ package main
 // directory, default ~/ca-go), or use the CLI subcommands for scripting
 // (passwords via environment variables, never on the command line):
 //
-//   ca-go new-ca                        CAGO_ROOT_PASS, CAGO_SIGN_PASS
-//   ca-go server <fqdn>                 CAGO_SIGN_PASS, CAGO_P12_PASS (optional)
-//   ca-go user <cn> <email>             CAGO_USER_PASS, CAGO_SIGN_PASS, CAGO_P12_PASS (optional)
-//   ca-go revoke-server <fqdn>          CAGO_SIGN_PASS
-//   ca-go revoke-user <email>           CAGO_SIGN_PASS
-//   ca-go crl                           CAGO_SIGN_PASS
+//   ca-go new-ca                        CAGO_ROOT_PASS
+//   ca-go server <fqdn>                 CAGO_ROOT_PASS, CAGO_P12_PASS (optional)
+//   ca-go user <cn> <email>             CAGO_USER_PASS, CAGO_ROOT_PASS, CAGO_P12_PASS (optional)
+//   ca-go revoke-server <fqdn>          CAGO_ROOT_PASS
+//   ca-go revoke-user <email>           CAGO_ROOT_PASS
+//   ca-go crl                           CAGO_ROOT_PASS
 //   ca-go show
 //
 // Settings (CA directory, organization, CA subject names)
@@ -45,21 +45,21 @@ func main() {
   var err error
   switch args[0] {
   case "new-ca":
-    _, err = NewCA(os.Getenv(envRootPass), os.Getenv(envSignPass))
+    _, err = NewCA(os.Getenv(envRootPass))
   case "server":
     need(len(args) == 2, "usage: ca-go server <fqdn>")
-    _, err = IssueServer(args[1], os.Getenv(envSignPass), os.Getenv(envP12Pass))
+    _, err = IssueServer(args[1], os.Getenv(envRootPass), os.Getenv(envP12Pass))
   case "user":
     need(len(args) == 3, "usage: ca-go user <cn> <email>")
-    _, err = IssueUser(args[1], args[2], os.Getenv(envUserPass), os.Getenv(envSignPass), os.Getenv(envP12Pass))
+    _, err = IssueUser(args[1], args[2], os.Getenv(envUserPass), os.Getenv(envRootPass), os.Getenv(envP12Pass))
   case "revoke-server":
     need(len(args) == 2, "usage: ca-go revoke-server <fqdn>")
-    _, err = Revoke("server", args[1], os.Getenv(envSignPass))
+    _, err = Revoke("server", args[1], os.Getenv(envRootPass))
   case "revoke-user":
     need(len(args) == 2, "usage: ca-go revoke-user <email>")
-    _, err = Revoke("user", args[1], os.Getenv(envSignPass))
+    _, err = Revoke("user", args[1], os.Getenv(envRootPass))
   case "crl":
-    _, err = RegenerateCRL(os.Getenv(envSignPass))
+    _, err = RegenerateCRL(os.Getenv(envRootPass))
   case "show":
     recs, e := ListIssued()
     if e != nil {

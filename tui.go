@@ -5,7 +5,6 @@ package main
 
 import (
   "fmt"
-  "os"
   "path/filepath"
   "strings"
 
@@ -93,7 +92,6 @@ func initialModel() model {
     defs := []struct{ label, val string }{
       {"Organization", ""},
       {"Root CA CN", ""},
-      {"Signing CA CN", ""},
       {"CA directory", baseDir},
     }
     for _, d := range defs {
@@ -134,20 +132,18 @@ func (m model) startForm(act action) (tea.Model, tea.Cmd) {
   case actNewCA:
     add("Root CA passphrase", "", true)
     add("Confirm root passphrase", "", true)
-    add("Signing CA passphrase", "", true)
-    add("Confirm signing passphrase", "", true)
   case actCRL:
-    add("Signing CA passphrase", "", true)
+    add("CA passphrase", "", true)
   case actServer:
     add("FQDN (e.g. host.example.com)", "", false)
-    add("Signing CA passphrase", "", true)
+    add("CA passphrase", "", true)
     add("p12 export passphrase (empty = none)", "", true)
   case actUser:
     add("Common name (e.g. User Name)", "", false)
     add("Email (e.g. name@example.com)", "", false)
     add("User passphrase", "", true)
     add("Confirm user passphrase", "", true)
-    add("Signing CA passphrase", "", true)
+    add("CA passphrase", "", true)
     add("p12 export passphrase (empty = none)", "", true)
   case actRevokeServer, actRevokeUser:
     kind := "server"
@@ -157,6 +153,7 @@ func (m model) startForm(act action) (tea.Model, tea.Cmd) {
     recs, err := ListIssued()
     if err != nil {
       m.screen = scrResult
+      m.lines = nil
       m.errMsg = err.Error()
       return m, nil
     }
@@ -200,16 +197,12 @@ func (m model) submitForm() (model, tea.Cmd) {
 
   // validations
   if act == actNewCA {
-    if vals[0] == "" || vals[2] == "" {
-      m.errMsg = "passphrases must not be empty"
+    if vals[0] == "" {
+      m.errMsg = "passphrase must not be empty"
       return m, nil
     }
     if vals[0] != vals[1] {
-      m.errMsg = "root passphrases do not match"
-      return m, nil
-    }
-    if vals[2] != vals[3] {
-      m.errMsg = "signing passphrases do not match"
+      m.errMsg = "passphrases do not match"
       return m, nil
     }
   }
@@ -236,17 +229,17 @@ func (m model) submitForm() (model, tea.Cmd) {
     return m, nil
   }
   if act == actSettings {
-    for i, label := range []string{"organization", "root CA CN", "signing CA CN"} {
+    for i, label := range []string{"organization", "root CA CN"} {
       if vals[i] == "" {
         m.errMsg = label + " must not be empty"
         return m, nil
       }
     }
-    if !filepath.IsAbs(vals[3]) {
+    if !filepath.IsAbs(vals[2]) {
       m.errMsg = "directory must be an absolute path"
       return m, nil
     }
-    newDir := vals[3]
+    newDir := vals[2]
     // if a CA already lives in the target directory, saving a different
     // identity would desync config and certificates: refuse and alert
     rootExists, err := exists(filepath.Join(newDir, "ca-root/certs/root-ca.crt"))
@@ -254,34 +247,31 @@ func (m model) submitForm() (model, tea.Cmd) {
       m.errMsg = err.Error()
       return m, nil
     }
-    signExists, err := exists(filepath.Join(newDir, "ca-sign/certs/sign-ca.crt"))
-    if err != nil {
-      m.errMsg = err.Error()
-      return m, nil
-    }
-    if rootExists || signExists {
-      bad := caIdentityMismatches(newDir, vals[0], vals[1], vals[2])
+    if rootExists {
+      bad := caIdentityMismatches(newDir, vals[0], vals[1])
       if len(bad) > 0 {
-        m.errMsg = strings.Join([]string{
+        msg := strings.Join([]string{
           "configuration NOT saved.",
           "",
           "The CA certificate does not match the new configuration:",
         }, "\n")
         for _, b := range bad {
-          m.errMsg += "\n  - " + b
+          msg += "\n  - " + b
         }
-        m.errMsg += strings.Join([]string{
+        msg += strings.Join([]string{
           "",
-          "Fix the values above, or, if you want a clean CA, remove the existing one manually:",
+          "",
+          "Check the values and try again, or, if you want a clean CA, remove the existing one manually:",
           "",
           "    " + removeCommandFor(newDir),
-          "",
-          "Nothing was changed.",
         }, "\n")
+        // shown on the result screen like every other warning
+        m.screen = scrResult
+        m.errMsg = msg
         return m, nil
       }
     }
-    orgName, rootCN, signCN = vals[0], vals[1], vals[2]
+    orgName, rootCN = vals[0], vals[1]
     baseDir = newDir
     if err := saveConf(); err != nil {
       m.errMsg = err.Error()
@@ -292,18 +282,18 @@ func (m model) submitForm() (model, tea.Cmd) {
     return m, nil
   }
   if act == actSetup {
-    for i, label := range []string{"organization", "root CA CN", "signing CA CN"} {
+    for i, label := range []string{"organization", "root CA CN"} {
       if vals[i] == "" {
         m.errMsg = label + " must not be empty"
         return m, nil
       }
     }
-    if !filepath.IsAbs(vals[3]) {
+    if !filepath.IsAbs(vals[2]) {
       m.errMsg = "directory must be an absolute path"
       return m, nil
     }
-    orgName, rootCN, signCN = vals[0], vals[1], vals[2]
-    baseDir = vals[3]
+    orgName, rootCN = vals[0], vals[1]
+    baseDir = vals[2]
     if err := saveConf(); err != nil {
       m.errMsg = err.Error()
       return m, nil
@@ -320,7 +310,7 @@ func (m model) submitForm() (model, tea.Cmd) {
     var err error
     switch act {
     case actNewCA:
-      lines, err = NewCA(vals[0], vals[2])
+      lines, err = NewCA(vals[0])
     case actCRL:
       lines, err = RegenerateCRL(vals[0])
     case actServer:
@@ -408,6 +398,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
       switch msg.String() {
       case "enter", "esc", "q":
         m.screen = scrMenu
+        m.lines = nil
         return m, nil
       }
     }
@@ -436,21 +427,23 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
     switch action(m.menuIdx) {
     case actShow:
       recs, err := ListIssued()
-      m.lines = nil
       if err != nil {
+        m.screen = scrResult
+        m.lines = nil
         m.errMsg = err.Error()
-      } else {
-        for _, r := range recs {
-          status := "valid"
-          if r.Revoked {
-            status = "REVOKED"
-          }
-          m.lines = append(m.lines, fmt.Sprintf("%-7s %-28s %-20s expires %s [%s]",
-            r.Kind, r.Name, r.CommonName, r.NotAfter.Format("2006-01-02"), status))
+        return m, nil
+      }
+      m.lines = nil
+      for _, r := range recs {
+        status := "valid"
+        if r.Revoked {
+          status = "REVOKED"
         }
-        if len(m.lines) == 0 {
-          m.lines = []string{"No certificates issued yet."}
-        }
+        m.lines = append(m.lines, fmt.Sprintf("%-7s %-28s %-20s expires %s [%s]",
+          r.Kind, r.Name, r.CommonName, r.NotAfter.Format("2006-01-02"), status))
+      }
+      if len(m.lines) == 0 {
+        m.lines = []string{"No certificates issued yet."}
       }
       m.screen = scrList
       return m, nil
@@ -488,7 +481,6 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
       defs := []struct{ label, val string }{
         {"Organization", orgName},
         {"Root CA CN", rootCN},
-        {"Signing CA CN", signCN},
         {"CA directory", baseDir},
       }
       for _, d := range defs {
@@ -499,8 +491,16 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
       return m, textinput.Blink
     }
     if act == actNewCA {
-      if _, err := os.Stat(signCertPath()); err == nil {
+      rootExists, err := exists(rootCertPath())
+      if err != nil {
         m.screen = scrResult
+        m.lines = nil
+        m.errMsg = err.Error()
+        return m, nil
+      }
+      if rootExists {
+        m.screen = scrResult
+        m.lines = nil
         m.errMsg = "CA already exists in " + baseDir + ".\n\nIf you want a clean CA, remove the existing one manually:\n\n    " + removeCommandFor(baseDir)
         return m, nil
       }
@@ -590,7 +590,7 @@ func (m model) updatePick(msg tea.Msg) (tea.Model, tea.Cmd) {
     }
   case "enter":
     // single passphrase field, then run
-    m.fields = []field{newField("Signing CA passphrase", "", true)}
+    m.fields = []field{newField("CA passphrase", "", true)}
     m.focus = 0
     m.screen = scrForm
     return m, textinput.Blink
