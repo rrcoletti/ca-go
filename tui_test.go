@@ -2,6 +2,8 @@ package main
 
 import (
   "os"
+  "path/filepath"
+  "strings"
   "testing"
 
   tea "github.com/charmbracelet/bubbletea"
@@ -149,7 +151,7 @@ func TestFirstRunSetup(t *testing.T) {
       m.screen, m.action, len(m.fields))
   }
   tab := tea.KeyMsg{Type: tea.KeyTab}
-  inputs := []string{"Acme", "Acme Root CA", "Acme Sign CA"}
+  inputs := []string{"Example", "Example Root CA", "Example Sign CA"}
   for _, v := range inputs {
     m = keys(m, runes(v))
     m = keys(m, []tea.KeyMsg{tab})
@@ -163,7 +165,7 @@ func TestFirstRunSetup(t *testing.T) {
   if m.screen != scrResult {
     t.Fatalf("expected result screen, got %d (err: %s)", m.screen, m.errMsg)
   }
-  if orgName != "Acme" || rootCN != "Acme Root CA" || signCN != "Acme Sign CA" {
+  if orgName != "Example" || rootCN != "Example Root CA" || signCN != "Example Sign CA" {
     t.Fatalf("identity not set: %q %q %q", orgName, rootCN, signCN)
   }
   if !identityConfigured() {
@@ -218,5 +220,155 @@ func TestEditConfForm(t *testing.T) {
   }
   if baseDir != before || orgName != "New Org" || rootCN != "New Root CA" || signCN != "New Sign CA" {
     t.Fatalf("conf not persisted: dir=%q org=%q root=%q sign=%q", baseDir, orgName, rootCN, signCN)
+  }
+}
+
+// Submitting an identity that disagrees with an existing CA refuses to
+// save: the form stays open with the alert, and the conf is untouched.
+func TestEditConfRefusesOnMismatch(t *testing.T) {
+  chdirCA(t)
+  t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+  t.Setenv("HOME", t.TempDir())
+
+  // stub CA certs on disk (unreadable as DER, which counts as mismatch)
+  for _, p := range []func() string{rootCertPath, signCertPath} {
+    if err := os.MkdirAll(filepath.Dir(p()), 0700); err != nil {
+      t.Fatal(err)
+    }
+    if err := os.WriteFile(p(), []byte("stub"), 0600); err != nil {
+      t.Fatal(err)
+    }
+  }
+
+  m := initialModel()
+  for i := 0; i < 7; i++ {
+    next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+    m = next.(model)
+  }
+  next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+  for i := 0; i < 3; i++ {
+    m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+    m = m2.(model)
+  }
+  m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = m2.(model)
+
+  if m.screen != scrForm {
+    t.Fatalf("expected to stay on form, got screen=%d err=%s", m.screen, m.errMsg)
+  }
+  if !strings.Contains(m.errMsg, "configuration NOT saved") || !strings.Contains(m.errMsg, "rm -rf") {
+    t.Fatalf("missing refusal alert: %q", m.errMsg)
+  }
+  if orgName != "Test Org" || rootCN != "Test Root CA" || signCN != "Test Sign CA" {
+    t.Fatalf("globals were modified: %q %q %q", orgName, rootCN, signCN)
+  }
+  if _, err := os.Stat(t.TempDir()); err != nil {
+    t.Fatal(err)
+  }
+  confPath, _ := confPath()
+  if _, err := os.Stat(confPath); !os.IsNotExist(err) {
+    t.Fatal("conf file was written despite refusal")
+  }
+}
+
+// Opening Edit configuration after another form must not inherit that
+// form's leftover fields.
+func TestEditConfAfterServerFormIsClean(t *testing.T) {
+  chdirCA(t)
+
+  m := initialModel()
+  m.menuIdx = 2 // New server certificate
+  next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+  if len(m.fields) != 3 {
+    t.Fatalf("expected 3 server-cert fields, got %d", len(m.fields))
+  }
+  next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc}) // back to menu, fields retained
+  m = next.(model)
+  if len(m.fields) != 3 {
+    t.Fatalf("precondition: fields should still exist, got %d", len(m.fields))
+  }
+
+  m.menuIdx = 7 // Edit configuration
+  next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+  if m.screen != scrForm || m.action != actSettings {
+    t.Fatalf("expected settings form, got screen=%d action=%d", m.screen, m.action)
+  }
+  if len(m.fields) != 4 {
+    t.Fatalf("expected exactly 4 settings fields, got %d", len(m.fields))
+  }
+  want := []string{"Organization", "Root CA CN", "Signing CA CN", "CA directory"}
+  for i, w := range want {
+    if m.fields[i].label != w {
+      t.Fatalf("field %d label = %q, want %q", i, m.fields[i].label, w)
+    }
+  }
+}
+
+// Esc on the main menu quits; Esc everywhere else backs out one level.
+func TestEscOnMenuQuits(t *testing.T) {
+  chdirCA(t)
+  m := initialModel()
+  _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+  if cmd == nil {
+    t.Fatal("esc on menu should return a quit cmd")
+  }
+  if msg := cmd(); msg != tea.Quit() {
+    t.Fatalf("expected tea.Quit, got %v", msg)
+  }
+}
+
+// Reproduction: issue a user certificate through the TUI, then open
+// "Revoke user certificate" — the fresh cert must be on the list.
+func TestRevokeListSeesTUIIssuance(t *testing.T) {
+  chdirCA(t)
+  if _, err := NewCA("rp", "sp"); err != nil {
+    t.Fatal(err)
+  }
+
+  m := initialModel()
+  m.menuIdx = 4 // New user certificate
+  next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+  if m.screen != scrForm || m.action != actUser {
+    t.Fatalf("expected user form, got screen=%d", m.screen)
+  }
+
+  inputs := []string{"User Name", "user@example.com", "up", "up", "sp", ""}
+  for _, v := range inputs {
+    m = keys(m, runes(v))
+    m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // advance; submits on last
+    m = m2.(model)
+    if cmd != nil {
+      msg := cmd()
+      m2, _ = m.Update(msg) // doneMsg
+      m = m2.(model)
+    }
+  }
+  if m.screen != scrResult || m.errMsg != "" {
+    t.Fatalf("issuance failed: screen=%d err=%s", m.screen, m.errMsg)
+  }
+
+  // back to menu, open Revoke user certificate (menu item 5)
+  m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = m2.(model)
+  m.menuIdx = 5
+  next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+
+  // one valid user cert: the pick list still shows, for confirmation
+  if m.screen != scrPick {
+    t.Fatalf("expected pick screen, got screen=%d err=%s", m.screen, m.errMsg)
+  }
+  if len(m.picks) != 1 || m.picks[0] != "user@example.com" {
+    t.Fatalf("revoke list does not contain the fresh cert: %v", m.picks)
+  }
+  // Enter confirms the pick and asks for the signing passphrase
+  next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+  if m.screen != scrForm || len(m.fields) != 1 {
+    t.Fatalf("expected passphrase form after confirming pick, got screen=%d fields=%d", m.screen, len(m.fields))
   }
 }

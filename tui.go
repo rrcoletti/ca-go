@@ -1,7 +1,7 @@
 package main
 
 // TUI built on Bubble Tea. Arrow keys/vi keys to navigate, Enter to select,
-// Esc to cancel a form, q on the menu to quit.
+// Esc cancels a form or backs out of a screen; q or Esc on the menu quits.
 
 import (
   "fmt"
@@ -80,6 +80,7 @@ type model struct {
   pickIdx int
   lines   []string
   errMsg  string
+  width   int // terminal width, 0 until the first WindowSizeMsg
 }
 
 func initialModel() model {
@@ -170,12 +171,8 @@ func (m model) startForm(act action) (tea.Model, tea.Cmd) {
       m.lines = []string{"No " + kind + " certificates to revoke."}
       return m, nil
     }
-    if len(m.picks) == 1 {
-      // single candidate: go straight to passphrase
-      add("Signing CA passphrase", "", true)
-      m.screen = scrForm
-      return m, textinput.Blink
-    }
+    // always show the pick list, even for a single candidate: revoke is
+    // destructive and the user must see what they are about to revoke
     m.pickIdx = 0
     m.screen = scrPick
     return m, nil
@@ -249,8 +246,43 @@ func (m model) submitForm() (model, tea.Cmd) {
       m.errMsg = "directory must be an absolute path"
       return m, nil
     }
+    newDir := vals[3]
+    // if a CA already lives in the target directory, saving a different
+    // identity would desync config and certificates: refuse and alert
+    rootExists, err := exists(filepath.Join(newDir, "ca-root/certs/root-ca.crt"))
+    if err != nil {
+      m.errMsg = err.Error()
+      return m, nil
+    }
+    signExists, err := exists(filepath.Join(newDir, "ca-sign/certs/sign-ca.crt"))
+    if err != nil {
+      m.errMsg = err.Error()
+      return m, nil
+    }
+    if rootExists || signExists {
+      bad := caIdentityMismatches(newDir, vals[0], vals[1], vals[2])
+      if len(bad) > 0 {
+        m.errMsg = strings.Join([]string{
+          "configuration NOT saved.",
+          "",
+          "The CA certificate does not match the new configuration:",
+        }, "\n")
+        for _, b := range bad {
+          m.errMsg += "\n  - " + b
+        }
+        m.errMsg += strings.Join([]string{
+          "",
+          "Fix the values above, or, if you want a clean CA, remove the existing one manually:",
+          "",
+          "    " + removeCommandFor(newDir),
+          "",
+          "Nothing was changed.",
+        }, "\n")
+        return m, nil
+      }
+    }
     orgName, rootCN, signCN = vals[0], vals[1], vals[2]
-    baseDir = vals[3]
+    baseDir = newDir
     if err := saveConf(); err != nil {
       m.errMsg = err.Error()
       return m, nil
@@ -322,12 +354,36 @@ func (m model) submitRevokePass() (model, tea.Cmd) {
   }
 }
 
+// wrapText word-wraps s at width, preserving existing newlines.
+// Narrow or unknown widths fall back to 80 columns.
+func wrapText(s string, width int) string {
+  if width < 20 {
+    width = 80
+  }
+  var out []string
+  for _, line := range strings.Split(s, "\n") {
+    for len(line) > width {
+      cut := strings.LastIndex(line[:width], " ")
+      if cut <= 0 {
+        cut = width
+      }
+      out = append(out, strings.TrimRight(line[:cut], " "))
+      line = strings.TrimLeft(line[cut:], " ")
+    }
+    out = append(out, line)
+  }
+  return strings.Join(out, "\n")
+}
+
 func (m model) Init() tea.Cmd {
   return nil
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
   switch msg := msg.(type) {
+  case tea.WindowSizeMsg:
+    m.width = msg.Width
+    return m, nil
   case tea.KeyMsg:
     switch msg.String() {
     case "ctrl+c":
@@ -389,8 +445,8 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
           if r.Revoked {
             status = "REVOKED"
           }
-          m.lines = append(m.lines, fmt.Sprintf("%-7s %-28s expires %s [%s]",
-            r.Kind, r.Name, r.NotAfter.Format("2006-01-02"), status))
+          m.lines = append(m.lines, fmt.Sprintf("%-7s %-28s %-20s expires %s [%s]",
+            r.Kind, r.Name, r.CommonName, r.NotAfter.Format("2006-01-02"), status))
         }
         if len(m.lines) == 0 {
           m.lines = []string{"No certificates issued yet."}
@@ -428,6 +484,7 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
       m.action = actSettings
       m.focus = 0
       m.errMsg = ""
+      m.fields = nil // discard any fields left over from a previous form
       defs := []struct{ label, val string }{
         {"Organization", orgName},
         {"Root CA CN", rootCN},
@@ -444,12 +501,12 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
     if act == actNewCA {
       if _, err := os.Stat(signCertPath()); err == nil {
         m.screen = scrResult
-        m.errMsg = "CA already exists in this directory"
+        m.errMsg = "CA already exists in " + baseDir + ".\n\nIf you want a clean CA, remove the existing one manually:\n\n    " + removeCommandFor(baseDir)
         return m, nil
       }
     }
     return m.startForm(act)
-  case "q":
+  case "q", "esc":
     return m, tea.Quit
   }
   return m, nil
@@ -552,7 +609,12 @@ func (m model) renderForm() string {
     b.WriteString("   " + f.input.View() + "\n\n")
   }
   if m.errMsg != "" {
-    b.WriteString(errorStyle.Render("  "+m.errMsg) + "\n\n")
+    // indent and word-wrap every line: error text may span multiple
+    // lines, and bubbletea truncates anything wider than the terminal
+    for _, line := range strings.Split(wrapText(m.errMsg, m.width-4), "\n") {
+      b.WriteString(errorStyle.Render("  "+line) + "\n")
+    }
+    b.WriteString("\n")
   }
   b.WriteString(helpStyle.Render("  Enter: next/submit · Tab: next field · Esc: cancel"))
   return b.String()
@@ -593,7 +655,7 @@ func (m model) View() string {
       }
       body += style.Render(cursor+item) + "\n"
     }
-    body += "\n" + helpStyle.Render("  ↑/↓ or j/k: move · Enter: select · q: quit")
+    body += "\n" + helpStyle.Render("  ↑/↓ or j/k: move · Enter: select · q or Esc: quit")
   case scrForm:
     body = m.renderForm()
   case scrPick:
@@ -602,10 +664,16 @@ func (m model) View() string {
     body = "  Working..."
   case scrResult:
     for _, l := range m.lines {
-      body += "  " + okStyle.Render(l) + "\n"
+      for _, line := range strings.Split(wrapText(l, m.width-4), "\n") {
+        body += "  " + okStyle.Render(line) + "\n"
+      }
     }
     if m.errMsg != "" {
-      body += "\n  " + errorStyle.Render("ERROR: "+m.errMsg)
+      body += "\n"
+      errText := wrapText("ERROR: "+m.errMsg, m.width-4)
+      for _, line := range strings.Split(errText, "\n") {
+        body += "  " + errorStyle.Render(line) + "\n"
+      }
     }
     body += "\n" + helpStyle.Render("  Enter or q: back to menu")
   case scrList:
@@ -614,7 +682,9 @@ func (m model) View() string {
       if strings.Contains(l, "REVOKED") {
         style = errorStyle
       }
-      body += "  " + style.Render(l) + "\n"
+      for _, line := range strings.Split(wrapText(l, m.width-4), "\n") {
+        body += "  " + style.Render(line) + "\n"
+      }
     }
     body += "\n" + helpStyle.Render("  Enter or q: back to menu")
   }
