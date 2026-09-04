@@ -20,11 +20,11 @@ import (
   "fmt"
   "math/big"
   "os"
-	"os/exec"
-	"path/filepath"
-	"sort"
-	"strings"
-	"time"
+  "os/exec"
+  "path/filepath"
+  "sort"
+  "strings"
+  "time"
 )
 
 // baseDir is the root of the CA tree. Defaults to ~/ca-go and can be
@@ -50,7 +50,7 @@ func caPath(rel string) string { return filepath.Join(baseDir, rel) }
 
 func rootKeyPath() string   { return caPath("ca-root/keys/root-ca.key") }
 func rootCertPath() string  { return caPath("ca-root/certs/root-ca.crt") }
-func rootCrlPath() string  { return caPath("ca-root/crls/root-ca.crl") }
+func rootCrlPath() string   { return caPath("ca-root/crls/root-ca.crl") }
 func statePath() string     { return caPath("state.json") }
 func stateLockPath() string { return caPath("state.lock") }
 
@@ -71,10 +71,10 @@ func identityConfigured() bool {
 // caIdentityMismatches compares the CA certificates stored under dir
 // with the given identity values and returns human-readable
 // differences; an empty list means they match.
-func caIdentityMismatches(dir, org, wantRootCN string) []string {
+func caIdentityMismatches(dir, org, wantRootCN string) (*x509.Certificate, []string) {
   root, err := readCert(filepath.Join(dir, "ca-root/certs/root-ca.crt"))
   if err != nil {
-    return []string{"root certificate: " + err.Error()}
+    return nil, []string{"root certificate: " + err.Error()}
   }
   var bad []string
   if len(root.Subject.Organization) > 0 && root.Subject.Organization[0] != org {
@@ -83,12 +83,17 @@ func caIdentityMismatches(dir, org, wantRootCN string) []string {
   if root.Subject.CommonName != wantRootCN {
     bad = append(bad, fmt.Sprintf("root certificate CN is %q, in the configuration file is %q", root.Subject.CommonName, wantRootCN))
   }
-  return bad
+  return root, bad
 }
 
 // removeCommandFor returns the manual CA removal command for dir.
 func removeCommandFor(dir string) string {
   return "rm -rf '" + dir + "'/*"
+}
+
+// caExistsMessage is the warning shown when a CA already exists in dir.
+func caExistsMessage(dir string) string {
+  return "CA already exists in " + dir + ".\n\nIf you want a clean CA, remove the existing one manually:\n\n    " + removeCommandFor(dir)
 }
 
 // requireCA returns an error when no CA exists on disk.
@@ -103,23 +108,25 @@ func requireCA() error {
   return nil
 }
 
-// checkCAIdentity refuses issuance when the CA on disk is missing,
-// partial, or inconsistent with the configured identity.
-func checkCAIdentity() error {
+// checkCAIdentity refuses the given operation when the CA on disk is
+// missing or inconsistent with the configured identity. On success it
+// returns the parsed root certificate.
+func checkCAIdentity(op string) (*x509.Certificate, error) {
   if err := requireCA(); err != nil {
-    return err
+    return nil, err
   }
-  if bad := caIdentityMismatches(baseDir, orgName, rootCN); len(bad) > 0 {
-    msg := "cannot issue certificate. The CA certificate does not match ca-go configuration:\n"
+  caParsed, bad := caIdentityMismatches(baseDir, orgName, rootCN)
+  if len(bad) > 0 {
+    msg := "cannot " + op + ". The CA certificate does not match ca-go configuration:\n"
     for _, b := range bad {
       msg += "  - " + b + "\n"
     }
     msg += "\nFix the configuration (Edit configuration), or, if you want a clean CA, remove the existing one manually:\n\n    " +
       removeCommandFor(baseDir) +
       "\n\nNothing was changed."
-    return errors.New(msg)
+    return nil, errors.New(msg)
   }
-  return nil
+  return caParsed, nil
 }
 
 // CertRecord tracks one issued certificate.
@@ -260,8 +267,6 @@ func ensureDirs() error {
   return nil
 }
 
-// runOpenSSL runs the openssl CLI. stdin may be nil; envPW entries are
-// passed via the environment so passwords never appear in the argv.
 // appendLog best-effort appends lines to logs/ca-go.log in the CA
 // directory. Full detail lives there so user-facing errors can stay short.
 func appendLog(lines ...string) {
@@ -280,6 +285,8 @@ func appendLog(lines ...string) {
   }
 }
 
+// runOpenSSL runs the openssl CLI. stdin may be nil; envPW entries are
+// passed via the environment so passwords never appear in the argv.
 func runOpenSSL(stdin []byte, envPW map[string]string, args ...string) ([]byte, error) {
   cmd := exec.Command("openssl", args...)
   if stdin != nil {
@@ -397,14 +404,14 @@ func readCert(path string) (*x509.Certificate, error) {
 func NewCA(rootPass string) ([]string, error) {
   logs := []string{}
   if !identityConfigured() {
-    return logs, errors.New("identity not configured; run the TUI once to set it up, or fill in org/rootCN in ~/.config/ca-go/ca-go.conf")
+    return logs, errors.New("identity not configured; run the TUI once to set it up, or fill in org/rootCN in the ca-go configuration file")
   }
   rootExists, err := exists(rootCertPath())
   if err != nil {
     return logs, err
   }
   if rootExists {
-    return logs, errors.New("CA already exists in " + baseDir + ".\n\nIf you want a clean CA, remove the existing one manually:\n\n    " + removeCommandFor(baseDir))
+    return logs, errors.New(caExistsMessage(baseDir))
   }
   if rootPass == "" {
     return logs, errors.New("passphrase must not be empty")
@@ -520,14 +527,11 @@ func generateCRL(st *State, caParsed *x509.Certificate, caKey crypto.Signer) ([]
 
 func RegenerateCRL(caPass string) ([]string, error) {
   logs := []string{}
-  if err := requireCA(); err != nil {
+  caParsed, err := checkCAIdentity("regenerate the CRL")
+  if err != nil {
     return logs, err
   }
   if err := ensureDirs(); err != nil {
-    return logs, err
-  }
-  caParsed, err := readCert(rootCertPath())
-  if err != nil {
     return logs, err
   }
   caKey, err := readPrivateKey(rootKeyPath(), caPass, envRootPass)
@@ -567,14 +571,11 @@ func RegenerateCRL(caPass string) ([]string, error) {
 
 func Revoke(kind, name, caPass string) ([]string, error) {
   logs := []string{}
-  if err := requireCA(); err != nil {
+  caParsed, err := checkCAIdentity("revoke the certificate")
+  if err != nil {
     return logs, err
   }
   if err := ensureDirs(); err != nil {
-    return logs, err
-  }
-  caParsed, err := readCert(rootCertPath())
-  if err != nil {
     return logs, err
   }
   caKey, err := readPrivateKey(rootKeyPath(), caPass, envRootPass)
@@ -681,18 +682,15 @@ func Revoke(kind, name, caPass string) ([]string, error) {
 func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string, error) {
   logs := []string{}
   if !identityConfigured() {
-    return logs, errors.New("identity not configured; run the TUI once to set it up, or fill in org/rootCN in ~/.config/ca-go/ca-go.conf")
+    return logs, errors.New("identity not configured; run the TUI once to set it up, or fill in org/rootCN in the ca-go configuration file")
   }
   // before touching anything: the CA on disk must match the config
-  if err := checkCAIdentity(); err != nil {
+  caParsed, err := checkCAIdentity("issue certificate")
+  if err != nil {
     return logs, err
   }
   // verify the CA passphrase now: a wrong passphrase must fail
   // before any key, CSR or certificate is written
-  caParsed, err := readCert(rootCertPath())
-  if err != nil {
-    return logs, err
-  }
   caKey, err := readPrivateKey(rootKeyPath(), caPass, envRootPass)
   if err != nil {
     return logs, errors.New("cannot read the CA key. The CA passphrase seems wrong, or the key file is unreadable.\n\nSee 'logs/ca-go.log' in the CA directory for details")

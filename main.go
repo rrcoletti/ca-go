@@ -65,6 +65,10 @@ func main() {
     if e != nil {
       fail(e)
     }
+    if len(recs) == 0 {
+      fmt.Println("No certificates issued yet.")
+      return
+    }
     for _, r := range recs {
       status := "valid"
       if r.Revoked {
