@@ -260,12 +260,6 @@ func checkRevokedArtifacts(t *testing.T, dir, name string) {
     t.Fatalf("expected renamed artifacts, got %v", matches)
   }
   for _, f := range matches {
-    if !strings.HasSuffix(f, "key") && !strings.HasSuffix(f, "p12") {
-      // only key and p12 exist for users; chain/crt end in crt
-      continue
-    }
-  }
-  for _, f := range matches {
     info, err := os.Stat(f)
     if err != nil {
       t.Fatal(err)
@@ -432,5 +426,45 @@ func TestRevokeAndCRLWithoutCA(t *testing.T) {
       names = append(names, e.Name())
     }
     t.Fatalf("failing calls must not create anything, got %v", names)
+  }
+}
+
+// Consistency rule: a conf that disagrees with the CA on disk blocks
+// revocation and CRL regeneration, exactly like issuance. The refusal
+// happens before anything is written.
+func TestRevokeAndCRLRefuseIdentityMismatch(t *testing.T) {
+  oldBase := baseDir
+  baseDir = t.TempDir()
+  t.Cleanup(func() { baseDir = oldBase })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
+
+  if _, err := NewCA("rp"); err != nil {
+    t.Fatal(err)
+  }
+  stateBefore, err := os.ReadFile(filepath.Join(baseDir, "state.json"))
+  if err != nil {
+    t.Fatal(err)
+  }
+
+  orgName = "Someone Else"
+  _, err = Revoke("server", "host.example.com", "rp")
+  if err == nil || !strings.Contains(err.Error(), "cannot revoke the certificate") ||
+    !strings.Contains(err.Error(), "does not match ca-go configuration") {
+    t.Fatalf("expected revoke refusal, got: %v", err)
+  }
+  _, err = RegenerateCRL("rp")
+  if err == nil || !strings.Contains(err.Error(), "cannot regenerate the CRL") ||
+    !strings.Contains(err.Error(), "does not match ca-go configuration") {
+    t.Fatalf("expected CRL refusal, got: %v", err)
+  }
+
+  stateAfter, err := os.ReadFile(filepath.Join(baseDir, "state.json"))
+  if err != nil {
+    t.Fatal(err)
+  }
+  if string(stateBefore) != string(stateAfter) {
+    t.Fatal("state was modified despite refusal")
   }
 }

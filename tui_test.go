@@ -252,9 +252,6 @@ func TestEditConfRefusesOnMismatch(t *testing.T) {
   if orgName != "Test Org" || rootCN != "Test Root CA" {
     t.Fatalf("globals were modified: %q %q", orgName, rootCN)
   }
-  if _, err := os.Stat(t.TempDir()); err != nil {
-    t.Fatal(err)
-  }
   confPath, _ := confPath()
   if _, err := os.Stat(confPath); !os.IsNotExist(err) {
     t.Fatal("conf file was written despite refusal")
@@ -354,11 +351,22 @@ func TestRevokeListSeesTUIIssuance(t *testing.T) {
   if len(m.picks) != 1 || m.picks[0] != "user@example.com" {
     t.Fatalf("revoke list does not contain the fresh cert: %v", m.picks)
   }
-  // Enter confirms the pick and asks for the signing passphrase
+  // Enter confirms the pick and asks for the CA passphrase
   next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
   m = next.(model)
   if m.screen != scrForm || len(m.fields) != 1 {
     t.Fatalf("expected passphrase form after confirming pick, got screen=%d fields=%d", m.screen, len(m.fields))
+  }
+
+  // Esc backs out to the pick list, not to the menu, and the header
+  // names the kind being revoked
+  next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+  m = next.(model)
+  if m.screen != scrPick || len(m.picks) != 1 {
+    t.Fatalf("expected pick screen after Esc, got screen=%d picks=%d", m.screen, len(m.picks))
+  }
+  if !strings.Contains(m.View(), "User certificates:") {
+    t.Fatalf("pick header should name the kind, got: %s", m.View())
   }
 }
 

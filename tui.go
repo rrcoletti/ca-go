@@ -85,7 +85,7 @@ type model struct {
 func initialModel() model {
   m := model{screen: scrMenu}
   if !identityConfigured() {
-    // first run: setup form (org, CNs, directory)
+    // first run: setup form (org, root CN, directory)
     m.screen = scrForm
     m.action = actSetup
     m.focus = 0
@@ -228,7 +228,7 @@ func (m model) submitForm() (model, tea.Cmd) {
     m.errMsg = "fqdn must not be empty"
     return m, nil
   }
-  if act == actSettings {
+  if act == actSettings || act == actSetup {
     for i, label := range []string{"organization", "root CA CN"} {
       if vals[i] == "" {
         m.errMsg = label + " must not be empty"
@@ -239,58 +239,39 @@ func (m model) submitForm() (model, tea.Cmd) {
       m.errMsg = "directory must be an absolute path"
       return m, nil
     }
-    newDir := vals[2]
-    // if a CA already lives in the target directory, saving a different
-    // identity would desync config and certificates: refuse and alert
-    rootExists, err := exists(filepath.Join(newDir, "ca-root/certs/root-ca.crt"))
-    if err != nil {
-      m.errMsg = err.Error()
-      return m, nil
-    }
-    if rootExists {
-      bad := caIdentityMismatches(newDir, vals[0], vals[1])
-      if len(bad) > 0 {
-        msg := strings.Join([]string{
-          "configuration NOT saved.",
-          "",
-          "The CA certificate does not match the new configuration:",
-        }, "\n")
-        for _, b := range bad {
-          msg += "\n  - " + b
+    // Edit configuration only: if a CA already lives in the target
+    // directory, saving a different identity would desync config and
+    // certificates: refuse and alert
+    if act == actSettings {
+      rootExists, err := exists(filepath.Join(vals[2], "ca-root/certs/root-ca.crt"))
+      if err != nil {
+        m.errMsg = err.Error()
+        return m, nil
+      }
+      if rootExists {
+        _, bad := caIdentityMismatches(vals[2], vals[0], vals[1])
+        if len(bad) > 0 {
+          msg := strings.Join([]string{
+            "configuration NOT saved.",
+            "",
+            "The CA certificate does not match the new configuration:",
+          }, "\n")
+          for _, b := range bad {
+            msg += "\n  - " + b
+          }
+          msg += strings.Join([]string{
+            "",
+            "",
+            "Check the values and try again, or, if you want a clean CA, remove the existing one manually:",
+            "",
+            "    " + removeCommandFor(vals[2]),
+          }, "\n")
+          // shown on the result screen like every other warning
+          m.screen = scrResult
+          m.errMsg = msg
+          return m, nil
         }
-        msg += strings.Join([]string{
-          "",
-          "",
-          "Check the values and try again, or, if you want a clean CA, remove the existing one manually:",
-          "",
-          "    " + removeCommandFor(newDir),
-        }, "\n")
-        // shown on the result screen like every other warning
-        m.screen = scrResult
-        m.errMsg = msg
-        return m, nil
       }
-    }
-    orgName, rootCN = vals[0], vals[1]
-    baseDir = newDir
-    if err := saveConf(); err != nil {
-      m.errMsg = err.Error()
-      return m, nil
-    }
-    m.screen = scrResult
-    m.lines = []string{"Configuration saved."}
-    return m, nil
-  }
-  if act == actSetup {
-    for i, label := range []string{"organization", "root CA CN"} {
-      if vals[i] == "" {
-        m.errMsg = label + " must not be empty"
-        return m, nil
-      }
-    }
-    if !filepath.IsAbs(vals[2]) {
-      m.errMsg = "directory must be an absolute path"
-      return m, nil
     }
     orgName, rootCN = vals[0], vals[1]
     baseDir = vals[2]
@@ -322,7 +303,7 @@ func (m model) submitForm() (model, tea.Cmd) {
   }
 }
 
-// revokeNeedsPass returns the revoke passphrase index (the only field)
+// submitRevokePass validates the passphrase form and runs the revocation.
 func (m model) submitRevokePass() (model, tea.Cmd) {
   vals := m.formValues()
   if vals[0] == "" {
@@ -424,8 +405,31 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
   case "down", "j":
     m.menuIdx = (m.menuIdx + 1) % len(menuItems)
   case "enter":
-    switch action(m.menuIdx) {
-    case actShow:
+    if m.menuIdx == len(menuItems)-1 { // Quit
+      return m, tea.Quit
+    }
+    var act action
+    switch m.menuIdx {
+    case 0:
+      act = actNewCA
+    case 1:
+      act = actCRL
+    case 2:
+      act = actServer
+    case 3:
+      act = actRevokeServer
+    case 4:
+      act = actUser
+    case 5:
+      act = actRevokeUser
+    case 6:
+      act = actShow
+    case 7:
+      act = actSettings
+    default:
+      return m, nil
+    }
+    if act == actShow {
       recs, err := ListIssued()
       if err != nil {
         m.screen = scrResult
@@ -448,31 +452,8 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
       m.screen = scrList
       return m, nil
     }
-    if m.menuIdx == len(menuItems)-1 { // Quit
-      return m, tea.Quit
-    }
-    // New CA / CRL / server / user / revokes -> forms or pick
-    var act action
-    switch m.menuIdx {
-    case 0:
-      act = actNewCA
-    case 1:
-      act = actCRL
-    case 2:
-      act = actServer
-    case 3:
-      act = actRevokeServer
-    case 4:
-      act = actUser
-    case 5:
-      act = actRevokeUser
-    case 6:
-      act = actShow
-    case 7:
-      act = actSettings
-    }
     if act == actSettings {
-      // prefilled 4-field form for the full configuration
+      // prefilled form for the full configuration
       m.screen = scrForm
       m.action = actSettings
       m.focus = 0
@@ -501,7 +482,7 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
       if rootExists {
         m.screen = scrResult
         m.lines = nil
-        m.errMsg = "CA already exists in " + baseDir + ".\n\nIf you want a clean CA, remove the existing one manually:\n\n    " + removeCommandFor(baseDir)
+        m.errMsg = caExistsMessage(baseDir)
         return m, nil
       }
     }
@@ -516,8 +497,13 @@ func (m model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
   if key, ok := msg.(tea.KeyMsg); ok {
     switch key.String() {
     case "esc":
-      m.screen = scrMenu
       m.errMsg = ""
+      if m.action == actRevokeServer || m.action == actRevokeUser {
+        // back to the pick list, not out of the flow
+        m.screen = scrPick
+        return m, nil
+      }
+      m.screen = scrMenu
       return m, nil
     case "tab", "shift+tab", "down", "up":
       // move focus
@@ -622,7 +608,11 @@ func (m model) renderForm() string {
 
 func (m model) renderPick() string {
   var b strings.Builder
-  b.WriteString("  Available certificates:\n\n")
+  kind := "Server"
+  if m.action == actRevokeUser {
+    kind = "User"
+  }
+  b.WriteString("  " + kind + " certificates:\n\n")
   for i, p := range m.picks {
     cursor := "    "
     style := normalStyle
@@ -664,8 +654,14 @@ func (m model) View() string {
     body = "  Working..."
   case scrResult:
     for _, l := range m.lines {
+      // informational notices ("No server certificates to revoke.")
+      // render plain; the rest are successes
+      style := okStyle
+      if strings.HasPrefix(l, "No ") {
+        style = normalStyle
+      }
       for _, line := range strings.Split(wrapText(l, m.width-4), "\n") {
-        body += "  " + okStyle.Render(line) + "\n"
+        body += "  " + style.Render(line) + "\n"
       }
     }
     if m.errMsg != "" {
