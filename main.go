@@ -70,8 +70,8 @@ func main() {
       if r.Revoked {
         status = "REVOKED"
       }
-      fmt.Printf("%-7s %-28s expires %s [%s]\n",
-        r.Kind, r.Name, r.NotAfter.Format("2006-01-02"), status)
+      fmt.Printf("%-7s %-28s %-20s expires %s [%s]\n",
+        r.Kind, r.Name, r.CommonName, r.NotAfter.Format("2006-01-02"), status)
     }
     return
   default:

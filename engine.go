@@ -14,7 +14,6 @@ import (
   "crypto/x509"
   "crypto/x509/pkix"
   "encoding/asn1"
-  "encoding/hex"
   "encoding/json"
   "encoding/pem"
   "errors"
@@ -74,6 +73,75 @@ const (
 // identityConfigured reports whether the naming conf entries are present.
 func identityConfigured() bool {
   return orgName != "" && rootCN != "" && signCN != ""
+}
+
+// caIdentityMismatches compares the CA certificates stored under dir
+// with the given identity values and returns human-readable
+// differences; an empty list means they match.
+func caIdentityMismatches(dir, org, wantRootCN, wantSignCN string) []string {
+  orgOf := func(c *x509.Certificate) string {
+    if len(c.Subject.Organization) > 0 {
+      return c.Subject.Organization[0]
+    }
+    return ""
+  }
+  root, err := readCert(filepath.Join(dir, "ca-root/certs/root-ca.crt"))
+  if err != nil {
+    return []string{"root certificate: " + err.Error()}
+  }
+  sign, err := readCert(filepath.Join(dir, "ca-sign/certs/sign-ca.crt"))
+  if err != nil {
+    return []string{"signing certificate: " + err.Error()}
+  }
+  var bad []string
+  if o := orgOf(root); o != org {
+    bad = append(bad, fmt.Sprintf("root certificate organization is %q, in the configuration file is %q", o, org))
+  }
+  if root.Subject.CommonName != wantRootCN {
+    bad = append(bad, fmt.Sprintf("root certificate CN is %q, in the configuration file is %q", root.Subject.CommonName, wantRootCN))
+  }
+  if o := orgOf(sign); o != org {
+    bad = append(bad, fmt.Sprintf("signing certificate organization is %q, in the configuration file is %q", o, org))
+  }
+  if sign.Subject.CommonName != wantSignCN {
+    bad = append(bad, fmt.Sprintf("signing certificate CN is %q, in the configuration file is %q", sign.Subject.CommonName, wantSignCN))
+  }
+  return bad
+}
+
+// removeCommandFor returns the manual CA removal command for dir.
+func removeCommandFor(dir string) string {
+  return "rm -rf '" + dir + "'/*"
+}
+
+// checkCAIdentity refuses issuance when the CA on disk is missing,
+// partial, or inconsistent with the configured identity.
+func checkCAIdentity() error {
+  rootExists, err := exists(rootCertPath())
+  if err != nil {
+    return err
+  }
+  signExists, err := exists(signCertPath())
+  if err != nil {
+    return err
+  }
+  switch {
+  case !rootExists && !signExists:
+    return errors.New("no CA exists in " + baseDir + "; create one first")
+  case rootExists != signExists:
+    return errors.New("partial CA exists in " + baseDir + " (root or signing certificate is missing).\nIf you want a clean CA, remove the existing one manually:\n\n    " + removeCommandFor(baseDir))
+  }
+  if bad := caIdentityMismatches(baseDir, orgName, rootCN, signCN); len(bad) > 0 {
+    msg := "cannot issue certificate. The CA certificate does not match ca-go configuration:\n"
+    for _, b := range bad {
+      msg += "  - " + b + "\n"
+    }
+    msg += "\nFix the configuration (Edit configuration), or, if you want a clean CA, remove the existing one manually:\n\n    " +
+      removeCommandFor(baseDir) +
+      "\n\nNothing was changed."
+    return errors.New(msg)
+  }
+  return nil
 }
 
 // CertRecord tracks one issued certificate.
@@ -220,6 +288,24 @@ func ensureDirs() error {
 
 // runOpenSSL runs the openssl CLI. stdin may be nil; envPW entries are
 // passed via the environment so passwords never appear in the argv.
+// appendLog best-effort appends lines to logs/ca-go.log in the CA
+// directory. Full detail lives there so user-facing errors can stay short.
+func appendLog(lines ...string) {
+  p := caPath("logs/ca-go.log")
+  if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+    return
+  }
+  f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+  if err != nil {
+    return
+  }
+  defer f.Close()
+  fmt.Fprintf(f, "[%s]\n", time.Now().Format("2006-01-02 15:04:05"))
+  for _, l := range lines {
+    fmt.Fprintln(f, l)
+  }
+}
+
 func runOpenSSL(stdin []byte, envPW map[string]string, args ...string) ([]byte, error) {
   cmd := exec.Command("openssl", args...)
   if stdin != nil {
@@ -233,8 +319,10 @@ func runOpenSSL(stdin []byte, envPW map[string]string, args ...string) ([]byte, 
     cmd.Env = append(cmd.Env, k+"="+v)
   }
   if err := cmd.Run(); err != nil {
-    return out.Bytes(), fmt.Errorf("openssl %s failed: %s",
-      strings.Join(args, " "), strings.TrimSpace(errOut.String()))
+    // full detail goes to the log; user-facing errors stay short
+    appendLog("command: openssl "+strings.Join(args, " "),
+      "error: "+strings.TrimSpace(errOut.String()))
+    return out.Bytes(), fmt.Errorf("openssl %s failed", strings.Join(args, " "))
   }
   return out.Bytes(), nil
 }
@@ -347,9 +435,9 @@ func NewCA(rootPass, signPass string) ([]string, error) {
   }
   if rootExists || signExists {
     if rootExists != signExists {
-      return logs, errors.New("partial CA exists in this directory; remove the ca-root and ca-sign directories and re-run")
+      return logs, errors.New("partial CA exists in " + baseDir + " (root or signing certificate is missing).\nIf you want a clean CA, remove the existing one manually:\n\n    " + removeCommandFor(baseDir))
     }
-    return logs, errors.New("CA already exists in this directory")
+    return logs, errors.New("CA already exists in " + baseDir + ".\n\nIf you want a clean CA, remove the existing one manually:\n\n    " + removeCommandFor(baseDir))
   }
   if rootPass == "" || signPass == "" {
     return logs, errors.New("passphrases must not be empty")
@@ -414,11 +502,11 @@ func NewCA(rootPass, signPass string) ([]string, error) {
 
   rootEnc, err := encryptKey(rootKey, rootPass, envRootPass)
   if err != nil {
-    return logs, err
+    return logs, errors.New("cannot encrypt the root CA key.\n\nSee 'logs/ca-go.log' in the CA directory for details")
   }
   signEnc, err := encryptKey(signKey, signPass, envSignPass)
   if err != nil {
-    return logs, err
+    return logs, errors.New("cannot encrypt the signing CA key.\n\nSee 'logs/ca-go.log' in the CA directory for details")
   }
 
   // CA chain: intermediate + root
@@ -453,17 +541,32 @@ func NewCA(rootPass, signPass string) ([]string, error) {
     {rootCrlPath(), pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: rootCrlDER})},
     {signCrlPath(), pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: signCrlDER})},
   }
+  var detail []string
   for _, w := range writes {
     if err := os.WriteFile(w.path, w.data, 0600); err != nil {
       return logs, err
     }
-    logs = append(logs, "written: "+w.path)
+    detail = append(detail, "written: "+w.path)
   }
   if err := saveState(st); err != nil {
     return logs, err
   }
-  logs = append(logs, "CA created")
+  appendLog(detail...)
+  logs = append(logs,
+    "CA created",
+    "",
+    "See 'logs/ca-go.log' in the CA directory for details")
   return logs, nil
+}
+
+// parseSerialHex parses a stored serial hex string. Tolerates odd
+// lengths: older records were written without zero padding.
+func parseSerialHex(s string) (*big.Int, error) {
+  serial, ok := new(big.Int).SetString(s, 16)
+  if !ok {
+    return nil, fmt.Errorf("invalid serial %q", s)
+  }
+  return serial, nil
 }
 
 // generateSignCRL builds the signing CA's CRL DER from st. Callers are
@@ -474,11 +577,10 @@ func generateSignCRL(st *State, signParsed *x509.Certificate, signKey crypto.Sig
     if !c.Revoked {
       continue
     }
-    raw, err := hex.DecodeString(c.Serial)
+    serial, err := parseSerialHex(c.Serial)
     if err != nil {
       return nil, err
     }
-    serial := new(big.Int).SetBytes(raw)
     entries = append(entries, x509.RevocationListEntry{
       SerialNumber:   serial,
       RevocationTime: c.RevokedAt,
@@ -507,7 +609,7 @@ func RegenerateCRL(signPass string) ([]string, error) {
   }
   signKey, err := readPrivateKey(signKeyPath(), signPass, envSignPass)
   if err != nil {
-    return logs, fmt.Errorf("could not read signing CA key (wrong passphrase?): %w", err)
+    return logs, errors.New("cannot read the signing CA key. The signing passphrase seems wrong, or the key file is unreadable.\n\nSee 'logs/ca-go.log' in the CA directory for details")
   }
   lk, err := lockState()
   if err != nil {
@@ -528,10 +630,15 @@ func RegenerateCRL(signPass string) ([]string, error) {
   if err != nil {
     return logs, err
   }
-  if err := writePEM(signCrlPath(), "X509 CRL", der, &logs); err != nil {
+  var detail []string
+  if err := writePEM(signCrlPath(), "X509 CRL", der, &detail); err != nil {
     return logs, err
   }
-  logs = append(logs, "CRL regenerated")
+  appendLog(detail...)
+  logs = append(logs,
+    "CRL regenerated",
+    "",
+    "See 'logs/ca-go.log' in the CA directory for details")
   return logs, nil
 }
 
@@ -546,7 +653,7 @@ func Revoke(kind, name, signPass string) ([]string, error) {
   }
   signKey, err := readPrivateKey(signKeyPath(), signPass, envSignPass)
   if err != nil {
-    return logs, fmt.Errorf("could not read signing CA key (wrong passphrase?): %w", err)
+    return logs, errors.New("cannot read the signing CA key. The signing passphrase seems wrong, or the key file is unreadable.\n\nSee 'logs/ca-go.log' in the CA directory for details")
   }
   lk, err := lockState()
   if err != nil {
@@ -557,20 +664,28 @@ func Revoke(kind, name, signPass string) ([]string, error) {
   if err != nil {
     return logs, err
   }
-  found := false
+  // find the VALID record for this identity; older revoked records may
+  // also exist (reissue keeps them for CRL history)
+  validIdx := -1
+  hasRevoked := false
   for i := range st.Certs {
     c := &st.Certs[i]
-    if c.Kind == kind && c.Name == name {
-      if c.Revoked {
-        return logs, fmt.Errorf("certificate for %s is already revoked", name)
-      }
-      c.Revoked = true
-      c.RevokedAt = time.Now()
-      found = true
-      break
+    if c.Kind != kind || c.Name != name {
+      continue
+    }
+    if c.Revoked {
+      hasRevoked = true
+    } else {
+      validIdx = i
     }
   }
-  if !found {
+  switch {
+  case validIdx >= 0:
+    st.Certs[validIdx].Revoked = true
+    st.Certs[validIdx].RevokedAt = time.Now()
+  case hasRevoked:
+    return logs, fmt.Errorf("certificate for %s is already revoked", name)
+  default:
     return logs, fmt.Errorf("no issued %s certificate for %s", kind, name)
   }
 
@@ -584,10 +699,54 @@ func Revoke(kind, name, signPass string) ([]string, error) {
   if err != nil {
     return logs, fmt.Errorf("certificate marked revoked in %s, but the CRL update failed (re-run 'crl'): %w", statePath(), err)
   }
-  if err := writePEM(signCrlPath(), "X509 CRL", der, &logs); err != nil {
+  var detail []string
+  if err := writePEM(signCrlPath(), "X509 CRL", der, &detail); err != nil {
     return logs, fmt.Errorf("certificate marked revoked in %s, but the CRL could not be written (re-run 'crl'): %w", statePath(), err)
   }
-  logs = append(logs, fmt.Sprintf("certificate for %s revoked; CRL updated", name))
+
+  // revoke order: record + CRL first, then rename every artifact to
+  // <name>.revoked.<timestamp> and lock it down with mode 000. Nothing
+  // is deleted; the renamed files are dead weight kept for records.
+  stamp := time.Now().Format("20060102-150405")
+  kindDir := "servers"
+  if kind == "user" {
+    kindDir = "users"
+  }
+  for _, f := range []string{
+    caPath(kindDir + "/keys/" + name + ".key"),
+    caPath(kindDir + "/csrs/" + name + ".csr"),
+    caPath(kindDir + "/certs/" + name + ".crt"),
+    caPath(kindDir + "/certs/" + name + "-chain.pem"),
+    caPath(kindDir + "/p12/" + name + ".p12"),
+  } {
+    ok, err := exists(f)
+    if err != nil {
+      return logs, err
+    }
+    if !ok {
+      continue
+    }
+    renamed := f + ".revoked." + stamp
+    for i := 2; ; i++ {
+      if _, err := os.Lstat(renamed); os.IsNotExist(err) {
+        break
+      }
+      renamed = fmt.Sprintf("%s.revoked.%s-%d", f, stamp, i)
+    }
+    if err := os.Rename(f, renamed); err != nil {
+      return logs, fmt.Errorf("revocation recorded in %s, but renaming %s failed: %w", statePath(), f, err)
+    }
+    if err := os.Chmod(renamed, 0000); err != nil {
+      return logs, fmt.Errorf("revocation recorded in %s, but locking down %s failed: %w", statePath(), renamed, err)
+    }
+    detail = append(detail, "renamed "+f+" -> "+filepath.Base(renamed)+" (revoked, mode 000)")
+  }
+  detail = append(detail, "certificate for "+name+" revoked; CRL updated")
+  appendLog(detail...)
+  logs = append(logs,
+    "certificate for "+name+" revoked; CRL updated",
+    "",
+    "See 'logs/ca-go.log' in the CA directory for details")
   return logs, nil
 }
 
@@ -595,6 +754,19 @@ func Revoke(kind, name, signPass string) ([]string, error) {
 // User keys are passphrase-protected PKCS#8; server keys are plain.
 func issueCert(kind, name, cn, email, keyPass, signPass, p12Pass string) ([]string, error) {
   logs := []string{}
+  if !identityConfigured() {
+    return logs, errors.New("identity not configured; run the TUI once to set it up, or fill in org/rootCN/signCN in ~/.config/ca-go/ca-go.conf")
+  }
+  // before touching anything: the CA on disk must match the config
+  if err := checkCAIdentity(); err != nil {
+    return logs, err
+  }
+  // verify the signing passphrase now: a wrong passphrase must fail
+  // before any key, CSR or certificate is written
+  signKey, err := readPrivateKey(signKeyPath(), signPass, envSignPass)
+  if err != nil {
+    return logs, errors.New("cannot read the signing CA key. The signing passphrase seems wrong, or the key file is unreadable.\n\nSee 'logs/ca-go.log' in the CA directory for details")
+  }
   if err := ensureDirs(); err != nil {
     return logs, err
   }
@@ -605,6 +777,32 @@ func issueCert(kind, name, cn, email, keyPass, signPass, p12Pass string) ([]stri
     return logs, err
   }
   defer unlockState(lk)
+  var detail []string
+  st, err := loadState()
+  if err != nil {
+    return logs, err
+  }
+  // duplicate guard: among VALID certificates, a user email and common
+  // name, and a server FQDN, must be unique. Revoked certificates do
+  // not block reissuing.
+  for i := range st.Certs {
+    c := &st.Certs[i]
+    if c.Kind != kind {
+      continue
+    }
+    if c.Revoked {
+      continue
+    }
+    if kind == "user" && c.CommonName == cn {
+      return logs, fmt.Errorf("a valid user certificate with common name %q already exists (issued for %s); revoke it first if you want to reissue", cn, c.Name)
+    }
+    if c.Name == name {
+      if kind == "user" {
+        return logs, fmt.Errorf("a valid user certificate for %s already exists; revoke it first if you want to reissue", name)
+      }
+      return logs, fmt.Errorf("a valid server certificate for %s already exists; revoke it first if you want to reissue", name)
+    }
+  }
   kindDir := "servers"
   if kind == "user" {
     kindDir = "users"
@@ -628,7 +826,8 @@ func issueCert(kind, name, cn, email, keyPass, signPass, p12Pass string) ([]stri
     return logs, err
   }
   // broken state: without the key, the other artifacts are useless;
-  // without the cert, chain and p12 are stale.
+  // without the cert, chain and p12 are stale. (Revoked certificates
+  // were renamed away in Revoke, so their slots are already free.)
   if !keyOK {
     for _, f := range []string{csrPath, crtPath, chainPath, p12Path} {
       ok, err := exists(f)
@@ -637,7 +836,7 @@ func issueCert(kind, name, cn, email, keyPass, signPass, p12Pass string) ([]stri
       }
       if ok {
         _ = os.Remove(f)
-        logs = append(logs, "removed "+f+" (no matching key)")
+        detail = append(detail, "removed "+f+" (no matching key)")
       }
     }
   } else if !crtOK {
@@ -648,11 +847,11 @@ func issueCert(kind, name, cn, email, keyPass, signPass, p12Pass string) ([]stri
       }
       if ok {
         _ = os.Remove(f)
-        logs = append(logs, "removed "+f+" (stale, certificate will be reissued)")
+        detail = append(detail, "removed "+f+" (stale, certificate will be reissued)")
       }
     }
   } else {
-    return logs, fmt.Errorf("certificate for %s already exists", name)
+    return logs, fmt.Errorf("certificate files for %s already exist without a state record; remove them manually if you want to reissue", name)
   }
 
   // key
@@ -663,7 +862,7 @@ func issueCert(kind, name, cn, email, keyPass, signPass, p12Pass string) ([]stri
     }
     if kind == "user" {
       if err := writeEncryptedKey(key, keyPath, keyPass, envUserPass, &logs); err != nil {
-        return logs, err
+        return logs, errors.New("cannot write the encrypted user key.\n\nSee 'logs/ca-go.log' in the CA directory for details")
       }
     } else {
       der, err := x509.MarshalPKCS8PrivateKey(key)
@@ -673,7 +872,7 @@ func issueCert(kind, name, cn, email, keyPass, signPass, p12Pass string) ([]stri
       if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0600); err != nil {
         return logs, err
       }
-      logs = append(logs, "key written: "+keyPath)
+      detail = append(detail, "key written: "+keyPath)
     }
   }
 
@@ -686,6 +885,9 @@ func issueCert(kind, name, cn, email, keyPass, signPass, p12Pass string) ([]stri
     var keyObj crypto.PrivateKey
     if kind == "user" {
       keyObj, err = readPrivateKey(keyPath, keyPass, envUserPass)
+      if err != nil {
+        return logs, errors.New("cannot read the user key. The user passphrase seems wrong.\n\nSee 'logs/ca-go.log' in the CA directory for details")
+      }
     } else {
       block, _ := pem.Decode(keyData)
       if block == nil {
@@ -716,7 +918,7 @@ func issueCert(kind, name, cn, email, keyPass, signPass, p12Pass string) ([]stri
     if err := os.WriteFile(csrPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}), 0600); err != nil {
       return logs, err
     }
-    logs = append(logs, "written: "+csrPath)
+    detail = append(detail, "written: "+csrPath)
   }
 
   // sign
@@ -739,10 +941,6 @@ func issueCert(kind, name, cn, email, keyPass, signPass, p12Pass string) ([]stri
     signParsed, err := readCert(signCertPath())
     if err != nil {
       return logs, err
-    }
-    signKey, err := readPrivateKey(signKeyPath(), signPass, envSignPass)
-    if err != nil {
-      return logs, fmt.Errorf("could not read signing CA key (wrong passphrase?): %w", err)
     }
     pub, ok := csrParsed.PublicKey.(*ecdsa.PublicKey)
     if !ok {
@@ -775,7 +973,7 @@ func issueCert(kind, name, cn, email, keyPass, signPass, p12Pass string) ([]stri
     if err != nil {
       return logs, err
     }
-    if err := writePEM(crtPath, "CERTIFICATE", der, &logs); err != nil {
+    if err := writePEM(crtPath, "CERTIFICATE", der, &detail); err != nil {
       return logs, err
     }
 
@@ -793,14 +991,10 @@ func issueCert(kind, name, cn, email, keyPass, signPass, p12Pass string) ([]stri
     if err := os.WriteFile(chainPath, chain.Bytes(), 0600); err != nil {
       return logs, err
     }
-    logs = append(logs, "written: "+chainPath)
+    detail = append(detail, "written: "+chainPath)
 
-    st, err := loadState()
-    if err != nil {
-      return logs, err
-    }
     st.Certs = append(st.Certs, CertRecord{
-      Serial:     tmpl.SerialNumber.Text(16),
+      Serial:     fmt.Sprintf("%032x", tmpl.SerialNumber),
       Kind:       kind,
       Name:       name,
       CommonName: cn,
@@ -821,15 +1015,19 @@ func issueCert(kind, name, cn, email, keyPass, signPass, p12Pass string) ([]stri
       "-certfile", signCertPath(),
       "-passout", "env:"+envP12Pass, "-passin", "env:"+envUserPass)
     if err != nil {
-      return logs, err
+      return logs, errors.New("cannot export the PKCS#12 bundle.\n\nSee 'logs/ca-go.log' in the CA directory for details")
     }
     if err := os.WriteFile(p12Path, out, 0600); err != nil {
       return logs, err
     }
-    logs = append(logs, "written: "+p12Path)
+    detail = append(detail, "written: "+p12Path)
   }
 
-  logs = append(logs, "certificate for "+name+" issued")
+  appendLog(detail...)
+  logs = append(logs,
+    "certificate for "+name+" issued",
+    "",
+    "See 'logs/ca-go.log' in the CA directory for details")
   return logs, nil
 }
 
