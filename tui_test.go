@@ -16,9 +16,9 @@ func chdirCA(t *testing.T) {
   old := baseDir
   baseDir = t.TempDir()
   t.Cleanup(func() { baseDir = old })
-  oldOrg, oldRoot, oldSign := orgName, rootCN, signCN
-  orgName, rootCN, signCN = "Test Org", "Test Root CA", "Test Sign CA"
-  t.Cleanup(func() { orgName, rootCN, signCN = oldOrg, oldRoot, oldSign })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Test Org", "Test Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
 }
 
 // keys feeds a sequence of keystrokes to the model.
@@ -46,8 +46,8 @@ func openNewCAForm(t *testing.T) model {
   if m.screen != scrForm {
     t.Fatalf("expected form screen, got %d", m.screen)
   }
-  if len(m.fields) != 4 {
-    t.Fatalf("expected 4 fields, got %d", len(m.fields))
+  if len(m.fields) != 2 {
+    t.Fatalf("expected 2 fields, got %d", len(m.fields))
   }
   return m
 }
@@ -59,20 +59,16 @@ func TestNewCAFieldsAreIndependent(t *testing.T) {
   if got := m.fields[0].input.Value(); got != "pass1" {
     t.Fatalf("field 0 = %q", got)
   }
-  for i := 1; i < 4; i++ {
+  for i := 1; i < 2; i++ {
     if got := m.fields[i].input.Value(); got != "" {
       t.Fatalf("field %d leaked input: %q", i, got)
     }
   }
-  // one tab per field: fill 0, move to 1, 2, 3
+  // one tab per field: fill 0, move to 1
   m = keys(m, []tea.KeyMsg{{Type: tea.KeyTab}})
   m = keys(m, runes("two"))
-  m = keys(m, []tea.KeyMsg{{Type: tea.KeyTab}})
-  m = keys(m, runes("three"))
-  m = keys(m, []tea.KeyMsg{{Type: tea.KeyTab}})
-  m = keys(m, runes("four"))
 
-  want := []string{"pass1", "two", "three", "four"}
+  want := []string{"pass1", "two"}
   for i, w := range want {
     if got := m.fields[i].input.Value(); got != w {
       t.Fatalf("field %d = %q, want %q", i, got, w)
@@ -87,10 +83,6 @@ func TestNewCAPassphraseMismatch(t *testing.T) {
   m = keys(m, runes("aaa"))
   m = keys(m, []tea.KeyMsg{tab})
   m = keys(m, runes("bbb"))
-  m = keys(m, []tea.KeyMsg{tab})
-  m = keys(m, runes("ccc"))
-  m = keys(m, []tea.KeyMsg{tab})
-  m = keys(m, runes("ddd"))
   m = keys(m, []tea.KeyMsg{{Type: tea.KeyEnter}})
   if m.errMsg == "" {
     t.Fatal("expected mismatch error message")
@@ -112,10 +104,6 @@ func TestNewCAHappyPath(t *testing.T) {
   m = keys(m, runes("rootpass"))
   m = keys(m, []tea.KeyMsg{tab})
   m = keys(m, runes("rootpass"))
-  m = keys(m, []tea.KeyMsg{tab})
-  m = keys(m, runes("signpass"))
-  m = keys(m, []tea.KeyMsg{tab})
-  m = keys(m, runes("signpass"))
   m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
   m = m2.(model)
   if cmd == nil {
@@ -132,8 +120,8 @@ func TestNewCAHappyPath(t *testing.T) {
   if _, err := os.Stat(rootCertPath()); err != nil {
     t.Fatalf("root cert missing: %v", err)
   }
-  if _, err := os.Stat(signChainPath()); err != nil {
-    t.Fatalf("chain missing: %v", err)
+  if _, err := os.Stat(rootCrlPath()); err != nil {
+    t.Fatalf("CRL missing: %v", err)
   }
 }
 
@@ -143,15 +131,15 @@ func TestFirstRunSetup(t *testing.T) {
   chdirCA(t)
   t.Setenv("XDG_CONFIG_HOME", t.TempDir())
   t.Setenv("HOME", t.TempDir())
-  orgName, rootCN, signCN = "", "", ""
+  orgName, rootCN = "", ""
 
   m := initialModel()
-  if m.screen != scrForm || m.action != actSetup || len(m.fields) != 4 {
-    t.Fatalf("expected setup form with 4 fields, got screen=%d action=%d fields=%d",
+  if m.screen != scrForm || m.action != actSetup || len(m.fields) != 3 {
+    t.Fatalf("expected setup form with 3 fields, got screen=%d action=%d fields=%d",
       m.screen, m.action, len(m.fields))
   }
   tab := tea.KeyMsg{Type: tea.KeyTab}
-  inputs := []string{"Example", "Example Root CA", "Example Sign CA"}
+  inputs := []string{"Example", "Example Root CA"}
   for _, v := range inputs {
     m = keys(m, runes(v))
     m = keys(m, []tea.KeyMsg{tab})
@@ -165,8 +153,8 @@ func TestFirstRunSetup(t *testing.T) {
   if m.screen != scrResult {
     t.Fatalf("expected result screen, got %d (err: %s)", m.screen, m.errMsg)
   }
-  if orgName != "Example" || rootCN != "Example Root CA" || signCN != "Example Sign CA" {
-    t.Fatalf("identity not set: %q %q %q", orgName, rootCN, signCN)
+  if orgName != "Example" || rootCN != "Example Root CA" {
+    t.Fatalf("identity not set: %q %q", orgName, rootCN)
   }
   if !identityConfigured() {
     t.Fatal("identityConfigured() = false after setup")
@@ -187,16 +175,16 @@ func TestEditConfForm(t *testing.T) {
   }
   next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
   m = next.(model)
-  if m.screen != scrForm || m.action != actSettings || len(m.fields) != 4 {
-    t.Fatalf("expected settings form with 4 fields, got screen=%d action=%d fields=%d",
+  if m.screen != scrForm || m.action != actSettings || len(m.fields) != 3 {
+    t.Fatalf("expected settings form with 3 fields, got screen=%d action=%d fields=%d",
       m.screen, m.action, len(m.fields))
   }
-  if got := m.fields[3].input.Value(); got != baseDir {
+  if got := m.fields[2].input.Value(); got != baseDir {
     t.Fatalf("dir field = %q, want current baseDir %q", got, baseDir)
   }
   tab := tea.KeyMsg{Type: tea.KeyTab}
   bs := tea.KeyMsg{Type: tea.KeyBackspace}
-  newVals := []string{"New Org", "New Root CA", "New Sign CA"}
+  newVals := []string{"New Org", "New Root CA"}
   for i, v := range newVals {
     n0 := len(m.fields[i].input.Value())
     for n := 0; n < n0; n++ { // clear prefilled text
@@ -210,16 +198,16 @@ func TestEditConfForm(t *testing.T) {
   if m.screen != scrResult {
     t.Fatalf("expected result screen, got %d (err: %s)", m.screen, m.errMsg)
   }
-  if orgName != "New Org" || rootCN != "New Root CA" || signCN != "New Sign CA" {
-    t.Fatalf("identity not updated: %q %q %q", orgName, rootCN, signCN)
+  if orgName != "New Org" || rootCN != "New Root CA" {
+    t.Fatalf("identity not updated: %q %q", orgName, rootCN)
   }
   before := baseDir
-  orgName, rootCN, signCN = "", "", ""
+  orgName, rootCN = "", ""
   if err := loadConf(); err != nil {
     t.Fatal(err)
   }
-  if baseDir != before || orgName != "New Org" || rootCN != "New Root CA" || signCN != "New Sign CA" {
-    t.Fatalf("conf not persisted: dir=%q org=%q root=%q sign=%q", baseDir, orgName, rootCN, signCN)
+  if baseDir != before || orgName != "New Org" || rootCN != "New Root CA" {
+    t.Fatalf("conf not persisted: dir=%q org=%q root=%q", baseDir, orgName, rootCN)
   }
 }
 
@@ -230,8 +218,8 @@ func TestEditConfRefusesOnMismatch(t *testing.T) {
   t.Setenv("XDG_CONFIG_HOME", t.TempDir())
   t.Setenv("HOME", t.TempDir())
 
-  // stub CA certs on disk (unreadable as DER, which counts as mismatch)
-  for _, p := range []func() string{rootCertPath, signCertPath} {
+  // stub CA cert on disk (unreadable as DER, which counts as mismatch)
+  for _, p := range []func() string{rootCertPath} {
     if err := os.MkdirAll(filepath.Dir(p()), 0700); err != nil {
       t.Fatal(err)
     }
@@ -247,21 +235,22 @@ func TestEditConfRefusesOnMismatch(t *testing.T) {
   }
   next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
   m = next.(model)
-  for i := 0; i < 3; i++ {
+  for i := 0; i < 2; i++ {
     m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
     m = m2.(model)
   }
   m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
   m = m2.(model)
 
-  if m.screen != scrForm {
-    t.Fatalf("expected to stay on form, got screen=%d err=%s", m.screen, m.errMsg)
+  // the refusal is shown on the result screen like every other warning
+  if m.screen != scrResult {
+    t.Fatalf("expected result screen, got screen=%d err=%s", m.screen, m.errMsg)
   }
   if !strings.Contains(m.errMsg, "configuration NOT saved") || !strings.Contains(m.errMsg, "rm -rf") {
     t.Fatalf("missing refusal alert: %q", m.errMsg)
   }
-  if orgName != "Test Org" || rootCN != "Test Root CA" || signCN != "Test Sign CA" {
-    t.Fatalf("globals were modified: %q %q %q", orgName, rootCN, signCN)
+  if orgName != "Test Org" || rootCN != "Test Root CA" {
+    t.Fatalf("globals were modified: %q %q", orgName, rootCN)
   }
   if _, err := os.Stat(t.TempDir()); err != nil {
     t.Fatal(err)
@@ -296,10 +285,10 @@ func TestEditConfAfterServerFormIsClean(t *testing.T) {
   if m.screen != scrForm || m.action != actSettings {
     t.Fatalf("expected settings form, got screen=%d action=%d", m.screen, m.action)
   }
-  if len(m.fields) != 4 {
-    t.Fatalf("expected exactly 4 settings fields, got %d", len(m.fields))
+  if len(m.fields) != 3 {
+    t.Fatalf("expected exactly 3 settings fields, got %d", len(m.fields))
   }
-  want := []string{"Organization", "Root CA CN", "Signing CA CN", "CA directory"}
+  want := []string{"Organization", "Root CA CN", "CA directory"}
   for i, w := range want {
     if m.fields[i].label != w {
       t.Fatalf("field %d label = %q, want %q", i, m.fields[i].label, w)
@@ -324,7 +313,7 @@ func TestEscOnMenuQuits(t *testing.T) {
 // "Revoke user certificate" — the fresh cert must be on the list.
 func TestRevokeListSeesTUIIssuance(t *testing.T) {
   chdirCA(t)
-  if _, err := NewCA("rp", "sp"); err != nil {
+  if _, err := NewCA("rp"); err != nil {
     t.Fatal(err)
   }
 
@@ -336,7 +325,7 @@ func TestRevokeListSeesTUIIssuance(t *testing.T) {
     t.Fatalf("expected user form, got screen=%d", m.screen)
   }
 
-  inputs := []string{"User Name", "user@example.com", "up", "up", "sp", ""}
+  inputs := []string{"User Name", "user@example.com", "up", "up", "rp", ""}
   for _, v := range inputs {
     m = keys(m, runes(v))
     m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // advance; submits on last
@@ -370,5 +359,65 @@ func TestRevokeListSeesTUIIssuance(t *testing.T) {
   m = next.(model)
   if m.screen != scrForm || len(m.fields) != 1 {
     t.Fatalf("expected passphrase form after confirming pick, got screen=%d fields=%d", m.screen, len(m.fields))
+  }
+}
+
+// Leaving "Show issued certificates" must not leak its rows into a
+// later result screen (reproduction: show list, Esc, New CA with a CA
+// already on disk).
+func TestResultScreenHasNoStaleList(t *testing.T) {
+  chdirCA(t)
+  if _, err := NewCA("rp"); err != nil {
+    t.Fatal(err)
+  }
+  if _, err := IssueServer("host.example.com", "rp", ""); err != nil {
+    t.Fatal(err)
+  }
+
+  m := initialModel()
+  m.menuIdx = 6 // Show issued certificates
+  next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+  if m.screen != scrList || len(m.lines) == 0 {
+    t.Fatalf("expected list screen with rows, got screen=%d lines=%d", m.screen, len(m.lines))
+  }
+
+  next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc}) // back to menu
+  m = next.(model)
+  m.menuIdx = 0 // New CA
+  next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+
+  if m.screen != scrResult {
+    t.Fatalf("expected result screen, got %d", m.screen)
+  }
+  if len(m.lines) != 0 {
+    t.Fatalf("stale list leaked into result screen: %v", m.lines)
+  }
+  if !strings.Contains(m.errMsg, "CA already exists") {
+    t.Fatalf("expected CA-exists error, got %q", m.errMsg)
+  }
+}
+
+// A "Show issued certificates" failure lands on the result screen,
+// where the error is actually rendered (scrList ignores errMsg).
+func TestShowErrorGoesToResultScreen(t *testing.T) {
+  chdirCA(t)
+  if err := os.MkdirAll(baseDir, 0700); err != nil {
+    t.Fatal(err)
+  }
+  if err := os.WriteFile(filepath.Join(baseDir, "state.json"), []byte("not json"), 0600); err != nil {
+    t.Fatal(err)
+  }
+
+  m := initialModel()
+  m.menuIdx = 6 // Show issued certificates
+  next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+  if m.screen != scrResult {
+    t.Fatalf("expected result screen, got %d", m.screen)
+  }
+  if !strings.Contains(m.errMsg, "corrupt") {
+    t.Fatalf("expected corrupt-state error, got %q", m.errMsg)
   }
 }
