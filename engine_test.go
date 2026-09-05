@@ -468,3 +468,53 @@ func TestRevokeAndCRLRefuseIdentityMismatch(t *testing.T) {
     t.Fatal("state was modified despite refusal")
   }
 }
+
+// Clients match hostnames against the SAN, not the CN (CN is ignored),
+// so a server certificate must carry DNS:<fqdn> as subjectAltName.
+func TestServerCertHasSAN(t *testing.T) {
+  oldBase := baseDir
+  baseDir = t.TempDir()
+  t.Cleanup(func() { baseDir = oldBase })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
+
+  if _, err := NewCA("rp"); err != nil {
+    t.Fatal(err)
+  }
+  if _, err := IssueServer("host.example.com", "rp", ""); err != nil {
+    t.Fatal(err)
+  }
+  cert, err := readCert(filepath.Join(baseDir, "servers/certs/host.example.com.crt"))
+  if err != nil {
+    t.Fatal(err)
+  }
+  if len(cert.DNSNames) != 1 || cert.DNSNames[0] != "host.example.com" {
+    t.Fatalf("expected SAN DNS:host.example.com, got %v", cert.DNSNames)
+  }
+}
+
+// S/MIME clients match on the email SAN, so a user certificate must
+// carry RFC822:<email> as subjectAltName.
+func TestUserCertHasEmailSAN(t *testing.T) {
+  oldBase := baseDir
+  baseDir = t.TempDir()
+  t.Cleanup(func() { baseDir = oldBase })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
+
+  if _, err := NewCA("rp"); err != nil {
+    t.Fatal(err)
+  }
+  if _, err := IssueUser("User Name", "user@example.com", "up", "rp", ""); err != nil {
+    t.Fatal(err)
+  }
+  cert, err := readCert(filepath.Join(baseDir, "users/certs/user@example.com.crt"))
+  if err != nil {
+    t.Fatal(err)
+  }
+  if len(cert.EmailAddresses) != 1 || cert.EmailAddresses[0] != "user@example.com" {
+    t.Fatalf("expected SAN email:user@example.com, got %v", cert.EmailAddresses)
+  }
+}

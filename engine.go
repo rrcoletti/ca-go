@@ -839,6 +839,13 @@ func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string
       Subject:            subject,
       SignatureAlgorithm: x509.ECDSAWithSHA256,
     }
+    if kind == "server" {
+      // SAN is what clients match against; CN alone is ignored
+      tmpl.DNSNames = []string{cn}
+    } else {
+      // same for S/MIME clients, which match on the email SAN
+      tmpl.EmailAddresses = []string{email}
+    }
     csrDER, err := x509.CreateCertificateRequest(rand.Reader, &tmpl, keyObj)
     if err != nil {
       return logs, err
