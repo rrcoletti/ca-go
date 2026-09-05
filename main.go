@@ -29,6 +29,7 @@ package main
 //   ca-go revoke-user <email>           CAGO_ROOT_PASS
 //   ca-go crl                           CAGO_ROOT_PASS
 //   ca-go show
+//   ca-go version
 //
 // Settings (CA directory, organization, CA subject names)
 // live in ~/.config/ca-go/ca-go.conf; on first run the TUI asks for them.
@@ -39,6 +40,8 @@ import (
 
   tea "github.com/charmbracelet/bubbletea"
 )
+
+var version = "v1.0.0"
 
 func fail(err error) {
   fmt.Fprintln(os.Stderr, "ERROR:", err)
@@ -60,6 +63,9 @@ func main() {
 
   var err error
   switch args[0] {
+  case "version":
+    fmt.Println(version)
+    return
   case "new-ca":
     _, err = NewCA(os.Getenv(envRootPass))
   case "server":
@@ -96,7 +102,7 @@ func main() {
     return
   default:
     fmt.Println("usage: ca-go [new-ca | server <fqdn> | user <cn> <email> |")
-    fmt.Println("             revoke-server <fqdn> | revoke-user <email> | crl | show]")
+    fmt.Println("             revoke-server <fqdn> | revoke-user <email> | crl | show | version]")
     os.Exit(2)
   }
   if err != nil {
