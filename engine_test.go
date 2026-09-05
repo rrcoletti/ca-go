@@ -1,3 +1,19 @@
+// ca-go - private CA manager.
+// Copyright (C) 2026 Rafael Coletti
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package main
 
 import (
@@ -466,5 +482,55 @@ func TestRevokeAndCRLRefuseIdentityMismatch(t *testing.T) {
   }
   if string(stateBefore) != string(stateAfter) {
     t.Fatal("state was modified despite refusal")
+  }
+}
+
+// Clients match hostnames against the SAN, not the CN (CN is ignored),
+// so a server certificate must carry DNS:<fqdn> as subjectAltName.
+func TestServerCertHasSAN(t *testing.T) {
+  oldBase := baseDir
+  baseDir = t.TempDir()
+  t.Cleanup(func() { baseDir = oldBase })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
+
+  if _, err := NewCA("rp"); err != nil {
+    t.Fatal(err)
+  }
+  if _, err := IssueServer("host.example.com", "rp", ""); err != nil {
+    t.Fatal(err)
+  }
+  cert, err := readCert(filepath.Join(baseDir, "servers/certs/host.example.com.crt"))
+  if err != nil {
+    t.Fatal(err)
+  }
+  if len(cert.DNSNames) != 1 || cert.DNSNames[0] != "host.example.com" {
+    t.Fatalf("expected SAN DNS:host.example.com, got %v", cert.DNSNames)
+  }
+}
+
+// S/MIME clients match on the email SAN, so a user certificate must
+// carry RFC822:<email> as subjectAltName.
+func TestUserCertHasEmailSAN(t *testing.T) {
+  oldBase := baseDir
+  baseDir = t.TempDir()
+  t.Cleanup(func() { baseDir = oldBase })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
+
+  if _, err := NewCA("rp"); err != nil {
+    t.Fatal(err)
+  }
+  if _, err := IssueUser("User Name", "user@example.com", "up", "rp", ""); err != nil {
+    t.Fatal(err)
+  }
+  cert, err := readCert(filepath.Join(baseDir, "users/certs/user@example.com.crt"))
+  if err != nil {
+    t.Fatal(err)
+  }
+  if len(cert.EmailAddresses) != 1 || cert.EmailAddresses[0] != "user@example.com" {
+    t.Fatalf("expected SAN email:user@example.com, got %v", cert.EmailAddresses)
   }
 }
