@@ -20,7 +20,6 @@ package main
 // Esc cancels a form or backs out of a screen; q or Esc on the menu quits.
 
 import (
-  "fmt"
   "path/filepath"
   "strings"
 
@@ -273,14 +272,14 @@ func (m model) submitForm() (model, tea.Cmd) {
             "The CA certificate does not match the new configuration:",
           }, "\n")
           for _, b := range bad {
-            msg += "\n  - " + b
+            msg += "\n    - " + b
           }
           msg += strings.Join([]string{
             "",
             "",
             "Check the values and try again, or, if you want a clean CA, remove the existing one manually:",
             "",
-            "    " + removeCommandFor(vals[2]),
+            "  $ " + removeCommandFor(vals[2]),
           }, "\n")
           // shown on the result screen like every other warning
           m.screen = scrResult
@@ -455,12 +454,10 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
       }
       m.lines = nil
       for _, r := range recs {
-        status := "valid"
-        if r.Revoked {
-          status = "REVOKED"
-        }
-        m.lines = append(m.lines, fmt.Sprintf("%-7s %-28s %-20s expires %s [%s]",
-          r.Kind, r.Name, r.CommonName, r.NotAfter.Format("2006-01-02"), status))
+        m.lines = append(m.lines, formatRecord(r))
+      }
+      if len(m.lines) > 0 {
+        m.lines = append([]string{formatRecordHeader()}, m.lines...)
       }
       if len(m.lines) == 0 {
         m.lines = []string{"No certificates issued yet."}
@@ -602,19 +599,16 @@ func (m model) updatePick(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) renderForm() string {
   var b strings.Builder
-  for i, f := range m.fields {
-    cursor := "  "
-    if i == m.focus {
-      cursor = "> "
-    }
-    b.WriteString(cursor + f.label + ":\n")
-    b.WriteString("   " + f.input.View() + "\n\n")
+  b.WriteString("\n")
+  for _, f := range m.fields {
+    b.WriteString("      " + f.label + ":\n")
+    b.WriteString("      " + f.input.View() + "\n\n")
   }
   if m.errMsg != "" {
     // indent and word-wrap every line: error text may span multiple
     // lines, and bubbletea truncates anything wider than the terminal
-    for _, line := range strings.Split(wrapText(m.errMsg, m.width-4), "\n") {
-      b.WriteString(errorStyle.Render("  "+line) + "\n")
+    for _, line := range strings.Split(wrapText(m.errMsg, m.width-6), "\n") {
+      b.WriteString(errorStyle.Render("      "+line) + "\n")
     }
     b.WriteString("\n")
   }
@@ -624,16 +618,17 @@ func (m model) renderForm() string {
 
 func (m model) renderPick() string {
   var b strings.Builder
+  b.WriteString("\n")
   kind := "Server"
   if m.action == actRevokeUser {
     kind = "User"
   }
-  b.WriteString("  " + kind + " certificates:\n\n")
+  b.WriteString("      " + kind + " certificates:\n\n")
   for i, p := range m.picks {
-    cursor := "    "
+    cursor := "        "
     style := normalStyle
     if i == m.pickIdx {
-      cursor = "  > "
+      cursor = "      > "
       style = selectedStyle
     }
     b.WriteString(style.Render(cursor+p) + "\n")
@@ -644,7 +639,7 @@ func (m model) renderPick() string {
 
 // frame renders the title and the screen content.
 func (m model) frame(content string) string {
-  return titleStyle.Render("ca-go") + "\n\n" + content
+  return "  " + titleStyle.Render("ca-go "+version) + "\n\n" + content
 }
 
 func (m model) View() string {
@@ -653,10 +648,10 @@ func (m model) View() string {
   case scrMenu:
     body = "\n"
     for i, item := range menuItems {
-      cursor := "    "
+      cursor := "      "
       style := normalStyle
       if i == m.menuIdx {
-        cursor = "  > "
+        cursor = "    > "
         style = selectedStyle
       }
       body += style.Render(cursor+item) + "\n"
@@ -667,8 +662,9 @@ func (m model) View() string {
   case scrPick:
     body = m.renderPick()
   case scrRunning:
-    body = "  Working..."
+    body = "\n      Working..."
   case scrResult:
+    body = "\n"
     for _, l := range m.lines {
       // informational notices ("No server certificates to revoke.")
       // render plain; the rest are successes
@@ -676,26 +672,39 @@ func (m model) View() string {
       if strings.HasPrefix(l, "No ") {
         style = normalStyle
       }
-      for _, line := range strings.Split(wrapText(l, m.width-4), "\n") {
-        body += "  " + style.Render(line) + "\n"
+      for _, line := range strings.Split(wrapText(l, m.width-6), "\n") {
+        body += "      " + style.Render(line) + "\n"
       }
     }
     if m.errMsg != "" {
-      body += "\n"
-      errText := wrapText("ERROR: "+m.errMsg, m.width-4)
+      if len(m.lines) > 0 {
+        body += "\n"
+      }
+      errText := wrapText("ERROR: "+m.errMsg, m.width-6)
       for _, line := range strings.Split(errText, "\n") {
-        body += "  " + errorStyle.Render(line) + "\n"
+        body += "      " + errorStyle.Render(line) + "\n"
       }
     }
     body += "\n" + helpStyle.Render("  Enter or q: back to menu")
   case scrList:
+    body = "\n"
     for _, l := range m.lines {
       style := normalStyle
       if strings.Contains(l, "REVOKED") {
         style = errorStyle
       }
-      for _, line := range strings.Split(wrapText(l, m.width-4), "\n") {
-        body += "  " + style.Render(line) + "\n"
+      for _, line := range strings.Split(wrapText(l, m.width-6), "\n") {
+        // valid rows: color only the trailing status token; revoked
+        // rows stay entirely red as before
+        text, st := line, ""
+        if !strings.Contains(l, "REVOKED") && strings.HasSuffix(line, " Valid") {
+          text, st = strings.TrimSuffix(line, " Valid"), "Valid"
+        }
+        out := style.Render(text)
+        if st != "" {
+          out += " " + okStyle.Render(st)
+        }
+        body += "      " + out + "\n"
       }
     }
     body += "\n" + helpStyle.Render("  Enter or q: back to menu")

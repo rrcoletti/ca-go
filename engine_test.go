@@ -17,7 +17,11 @@
 package main
 
 import (
+  "crypto/ecdsa"
+  "crypto/elliptic"
+  "crypto/rand"
   "os"
+  "os/exec"
   "path/filepath"
   "strings"
   "testing"
@@ -507,6 +511,151 @@ func TestServerCertHasSAN(t *testing.T) {
   }
   if len(cert.DNSNames) != 1 || cert.DNSNames[0] != "host.example.com" {
     t.Fatalf("expected SAN DNS:host.example.com, got %v", cert.DNSNames)
+  }
+}
+
+// A half-created CA (leftover key without a certificate) must be
+// rejected with a manual-cleanup hint, not silently overwritten.
+func TestHalfCreatedCARejected(t *testing.T) {
+  oldBase := baseDir
+  baseDir = t.TempDir()
+  t.Cleanup(func() { baseDir = oldBase })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
+
+  if err := os.MkdirAll(filepath.Join(baseDir, "ca-root/keys"), 0700); err != nil {
+    t.Fatal(err)
+  }
+  if err := os.WriteFile(rootKeyPath(), []byte("junk"), 0600); err != nil {
+    t.Fatal(err)
+  }
+  _, err := NewCA("rp")
+  if err == nil {
+    t.Fatal("expected half-created CA error")
+  }
+  if !strings.Contains(err.Error(), "half-created CA files") ||
+    !strings.Contains(err.Error(), rootKeyPath()) {
+    t.Fatalf("expected manual-cleanup error listing the leftover file, got: %v", err)
+  }
+  if _, e := os.Stat(rootKeyPath()); e != nil {
+    t.Fatal("leftover key was removed implicitly")
+  }
+}
+
+// A half-created certificate (leftover key without a certificate) must
+// be rejected with a manual-cleanup hint, not cleaned up implicitly.
+func TestHalfCreatedCertRejected(t *testing.T) {
+  oldBase := baseDir
+  baseDir = t.TempDir()
+  t.Cleanup(func() { baseDir = oldBase })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
+
+  if _, err := NewCA("rp"); err != nil {
+    t.Fatal(err)
+  }
+  keyPath := filepath.Join(baseDir, "servers/keys/host.example.com.key")
+  if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
+    t.Fatal(err)
+  }
+  if err := os.WriteFile(keyPath, []byte("junk"), 0600); err != nil {
+    t.Fatal(err)
+  }
+  _, err := IssueServer("host.example.com", "rp", "")
+  if err == nil {
+    t.Fatal("expected half-created certificate error")
+  }
+  if !strings.Contains(err.Error(), "half-created certificate files") ||
+    !strings.Contains(err.Error(), keyPath) {
+    t.Fatalf("expected manual-cleanup error listing the leftover file, got: %v", err)
+  }
+  if _, e := os.Stat(keyPath); e != nil {
+    t.Fatal("leftover key was removed implicitly")
+  }
+}
+
+// Losing state.json must not reset the CRL number: the next CRL is
+// seeded from the number of the existing CRL file.
+func TestCRLNumberNeverGoesBackwards(t *testing.T) {
+  oldBase := baseDir
+  baseDir = t.TempDir()
+  t.Cleanup(func() { baseDir = oldBase })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
+
+  if _, err := NewCA("rp"); err != nil {
+    t.Fatal(err)
+  }
+  if _, err := RegenerateCRL("rp"); err != nil {
+    t.Fatal(err)
+  }
+  before, err := readCRLNumber(rootCrlPath())
+  if err != nil {
+    t.Fatal(err)
+  }
+  if before != 2 {
+    t.Fatalf("expected CRL number 2 after one regeneration, got %d", before)
+  }
+
+  if err := os.Remove(statePath()); err != nil {
+    t.Fatal(err)
+  }
+  if _, err := RegenerateCRL("rp"); err != nil {
+    t.Fatal(err)
+  }
+  after, err := readCRLNumber(rootCrlPath())
+  if err != nil {
+    t.Fatal(err)
+  }
+  if after != before+1 {
+    t.Fatalf("CRL number went backwards after state loss: before=%d after=%d", before, after)
+  }
+}
+
+// Rows longer than the FQDN/email column are truncated with a visible
+// ellipsis, keeping the table aligned.
+func TestFormatRecordTruncatesLongName(t *testing.T) {
+  long := "subdomain.example-with-a-very-long-name.example.com" // > 20 chars
+  row := formatRecord(CertRecord{Kind: "server", Name: long, CommonName: long})
+  if !strings.Contains(row, "subdomain.example-w…") {
+    t.Fatalf("expected truncated name with ellipsis, got: %q", row)
+  }
+  short := formatRecord(CertRecord{Kind: "server", Name: "host.example.com", CommonName: "host.example.com"})
+  if !strings.Contains(short, "host.example.com ") {
+    t.Fatalf("short names must not be truncated, got: %q", short)
+  }
+}
+
+// The encrypted key must carry a strong PBKDF2 iteration count; the
+// openssl default is only 2048.
+func TestEncryptedKeyUsesHighKDFIterations(t *testing.T) {
+  oldBase := baseDir
+  baseDir = t.TempDir()
+  t.Cleanup(func() { baseDir = oldBase })
+
+  key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+  if err != nil {
+    t.Fatal(err)
+  }
+  path := filepath.Join(baseDir, "k.key")
+  var detail []string
+  if err := writeEncryptedKey(key, path, "up", envUserPass, &detail); err != nil {
+    t.Fatal(err)
+  }
+  out, err := exec.Command("openssl", "asn1parse", "-in", path).Output()
+  if err != nil {
+    t.Fatal(err)
+  }
+  // 600000 = 0x927C0; the openssl default would be 0x0800 (2048)
+  if !strings.Contains(string(out), ":0927C0") {
+    t.Fatalf("expected PBKDF2 iteration count 600000 (0x927C0), got:\n%s", out)
+  }
+  // and the key must still be readable with its passphrase
+  if _, err := readPrivateKey(path, "up", envUserPass); err != nil {
+    t.Fatalf("encrypted key unreadable after hardening: %v", err)
   }
 }
 

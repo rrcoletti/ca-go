@@ -109,7 +109,7 @@ func removeCommandFor(dir string) string {
 
 // caExistsMessage is the warning shown when a CA already exists in dir.
 func caExistsMessage(dir string) string {
-  return "CA already exists in " + dir + ".\n\nIf you want a clean CA, remove the existing one manually:\n\n    " + removeCommandFor(dir)
+  return "CA already exists in " + dir + ".\n\nIf you want a clean CA, remove the existing one manually:\n\n  $ " + removeCommandFor(dir)
 }
 
 // requireCA returns an error when no CA exists on disk.
@@ -137,7 +137,7 @@ func checkCAIdentity(op string) (*x509.Certificate, error) {
     for _, b := range bad {
       msg += "  - " + b + "\n"
     }
-    msg += "\nFix the configuration (Edit configuration), or, if you want a clean CA, remove the existing one manually:\n\n    " +
+    msg += "\nFix the configuration (Edit configuration), or, if you want a clean CA, remove the existing one manually:\n\n  $ " +
       removeCommandFor(baseDir) +
       "\n\nNothing was changed."
     return nil, errors.New(msg)
@@ -163,10 +163,35 @@ type State struct {
   Certs     []CertRecord `json:"certs"`
 }
 
+// readCRLNumber parses the CRL file at path and returns its number.
+func readCRLNumber(path string) (int64, error) {
+  data, err := os.ReadFile(path)
+  if err != nil {
+    return 0, err
+  }
+  block, _ := pem.Decode(data)
+  if block == nil {
+    return 0, fmt.Errorf("could not decode %s", path)
+  }
+  rl, err := x509.ParseRevocationList(block.Bytes)
+  if err != nil {
+    return 0, err
+  }
+  if rl.Number == nil {
+    return 0, errors.New("CRL carries no number")
+  }
+  return rl.Number.Int64(), nil
+}
+
 func loadState() (*State, error) {
   st := &State{CRLNumber: 0}
   data, err := os.ReadFile(statePath())
   if errors.Is(err, os.ErrNotExist) {
+    // no state.json: seed the CRL number from the existing CRL so the
+    // number can never go backwards after a lost state file
+    if n, err := readCRLNumber(rootCrlPath()); err == nil {
+      st.CRLNumber = n
+    }
     return st, nil
   }
   if err != nil {
@@ -189,7 +214,11 @@ func saveState(st *State) error {
   if err := os.WriteFile(tmp, data, 0600); err != nil {
     return err
   }
-  return os.Rename(tmp, statePath())
+  if err := os.Rename(tmp, statePath()); err != nil {
+    _ = os.Remove(tmp)
+    return err
+  }
+  return nil
 }
 
 // confPath returns ~/.config/ca-go/ca-go.conf.
@@ -295,10 +324,15 @@ func appendLog(lines ...string) {
     return
   }
   defer f.Close()
-  fmt.Fprintf(f, "[%s]\n", time.Now().Format("2006-01-02 15:04:05"))
+  // one write keeps the entry atomic: concurrent ca-go processes can
+  // never interleave lines into the middle of it (O_APPEND + single
+  // write syscall)
+  var buf bytes.Buffer
+  fmt.Fprintf(&buf, "[%s]\n", time.Now().Format("2006-01-02 15:04:05"))
   for _, l := range lines {
-    fmt.Fprintln(f, l)
+    fmt.Fprintln(&buf, l)
   }
+  f.Write(buf.Bytes())
 }
 
 // runOpenSSL runs the openssl CLI. stdin may be nil; envPW entries are
@@ -325,7 +359,8 @@ func runOpenSSL(stdin []byte, envPW map[string]string, args ...string) ([]byte, 
 }
 
 // encryptKey returns an EC private key as passphrase-encrypted PKCS#8
-// (AES-256) via the openssl CLI. envName selects the password env var.
+// (AES-256, 600000-iteration PBKDF2) via the openssl CLI. envName
+// selects the password env var.
 func encryptKey(key *ecdsa.PrivateKey, pass, envName string) ([]byte, error) {
   der, err := x509.MarshalPKCS8PrivateKey(key)
   if err != nil {
@@ -334,6 +369,7 @@ func encryptKey(key *ecdsa.PrivateKey, pass, envName string) ([]byte, error) {
   pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
   return runOpenSSL(pemBytes, map[string]string{envName: pass},
     "pkcs8", "-topk8", "-v2", "aes256", "-inform", "pem",
+    "-iter", "600000",
     "-passout", "env:"+envName)
 }
 
@@ -380,20 +416,20 @@ func newSerial() (*big.Int, error) {
 
 // subjectKeyId derives the key identifier per RFC 5280 4.2.1.2:
 // SHA-1 over the public key BIT STRING, not the whole SPKI structure.
-func subjectKeyId(pub *ecdsa.PublicKey) []byte {
+func subjectKeyId(pub *ecdsa.PublicKey) ([]byte, error) {
   der, err := x509.MarshalPKIXPublicKey(pub)
   if err != nil {
-    panic(err)
+    return nil, err
   }
   var spki struct {
     Algorithm pkix.AlgorithmIdentifier
     PublicKey asn1.BitString
   }
   if _, err := asn1.Unmarshal(der, &spki); err != nil {
-    panic(err)
+    return nil, err
   }
   sum := sha1.Sum(spki.PublicKey.RightAlign())
-  return sum[:]
+  return sum[:], nil
 }
 
 func writePEM(path, blockType string, der []byte, logs *[]string) error {
@@ -415,8 +451,10 @@ func readCert(path string) (*x509.Certificate, error) {
 }
 
 // NewCA creates the root CA, which signs all leaf certificates
-// directly. Everything is computed before the first file is written, so
-// a failure part-way cannot leave a half-created CA behind.
+// directly. All computation (key generation, key encryption, CRL
+// signing) happens before any file is written, but the four writes are
+// separate steps: a crash between them can leave partial files behind.
+// The next run detects them and refuses until the user cleans up.
 func NewCA(rootPass string) ([]string, error) {
   logs := []string{}
   if !identityConfigured() {
@@ -428,6 +466,21 @@ func NewCA(rootPass string) ([]string, error) {
   }
   if rootExists {
     return logs, errors.New(caExistsMessage(baseDir))
+  }
+  // half-created CA: leftovers from an interrupted run are an error
+  // the user resolves manually; nothing is removed implicitly
+  var found []string
+  for _, f := range []string{rootKeyPath(), rootCrlPath(), statePath()} {
+    ok, err := exists(f)
+    if err != nil {
+      return logs, err
+    }
+    if ok {
+      found = append(found, f)
+    }
+  }
+  if len(found) > 0 {
+    return logs, fmt.Errorf("half-created CA files exist in %s: %s.\n\nRemove the listed files manually if you want to start over:\n\n  $ %s", baseDir, strings.Join(found, ", "), removeCommandFor(baseDir))
   }
   if rootPass == "" {
     return logs, errors.New("passphrase must not be empty")
@@ -502,8 +555,8 @@ func NewCA(rootPass string) ([]string, error) {
   return logs, nil
 }
 
-// parseSerialHex parses a stored serial hex string. Tolerates odd
-// lengths: older records were written without zero padding.
+// parseSerialHex parses a stored serial hex string, tolerating odd
+// lengths.
 func parseSerialHex(s string) (*big.Int, error) {
   serial, ok := new(big.Int).SetString(s, 16)
   if !ok {
@@ -769,33 +822,25 @@ func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string
   if err != nil {
     return logs, err
   }
-  // broken state: without the key, the other artifacts are useless;
-  // without the cert, chain and p12 are stale. (Revoked certificates
-  // were renamed away in Revoke, so their slots are already free.)
-  if !keyOK {
-    for _, f := range []string{csrPath, crtPath, chainPath, p12Path} {
+  // broken state: leftovers from an interrupted run (key without cert,
+  // csr without key, ...) are an error the user resolves manually;
+  // nothing is removed implicitly. Revoked certificates were renamed
+  // away in Revoke, so their slots are already free.
+  if keyOK || csrOK || crtOK {
+    var found []string
+    for _, f := range []string{keyPath, csrPath, crtPath, chainPath, p12Path} {
       ok, err := exists(f)
       if err != nil {
         return logs, err
       }
       if ok {
-        _ = os.Remove(f)
-        detail = append(detail, "removed "+f+" (no matching key)")
+        found = append(found, f)
       }
     }
-  } else if !crtOK {
-    for _, f := range []string{chainPath, p12Path} {
-      ok, err := exists(f)
-      if err != nil {
-        return logs, err
-      }
-      if ok {
-        _ = os.Remove(f)
-        detail = append(detail, "removed "+f+" (stale, certificate will be reissued)")
-      }
+    if keyOK && csrOK && crtOK {
+      return logs, fmt.Errorf("certificate files for %s already exist without a state record: %s.\n\nRemove the listed files manually if you want to reissue", name, strings.Join(found, ", "))
     }
-  } else {
-    return logs, fmt.Errorf("certificate files for %s already exist without a state record; remove them manually if you want to reissue", name)
+    return logs, fmt.Errorf("half-created certificate files for %s exist: %s.\n\nRemove the listed files manually if you want to reissue", name, strings.Join(found, ", "))
   }
 
   // key
@@ -897,19 +942,25 @@ func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string
     if err != nil {
       return logs, err
     }
+    ski, err := subjectKeyId(pub)
+    if err != nil {
+      return logs, err
+    }
     tmpl := x509.Certificate{
       SerialNumber:          serial,
       Subject:               csrParsed.Subject,
       NotBefore:             time.Now().Add(-time.Hour),
       NotAfter:              time.Now().Add(certValidity),
       BasicConstraintsValid: true,
-      SubjectKeyId:          subjectKeyId(pub),
+      SubjectKeyId:          ski,
       AuthorityKeyId:        caParsed.SubjectKeyId,
       SignatureAlgorithm:    x509.ECDSAWithSHA256,
     }
     if kind == "server" {
       tmpl.DNSNames = csrParsed.DNSNames
-      tmpl.KeyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment
+      // digital signature only: keyEncipherment is an RSA-era usage
+      // with no meaning for ECDSA keys
+      tmpl.KeyUsage = x509.KeyUsageDigitalSignature
       tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
     } else {
       tmpl.EmailAddresses = csrParsed.EmailAddresses
@@ -963,6 +1014,9 @@ func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string
       "pkcs12", "-export", "-name", name,
       "-in", crtPath, "-inkey", keyPath,
       "-certfile", rootCertPath(),
+      // the bundle carries the private key: strong KDF and MAC, like
+      // the encrypted key files
+      "-iter", "600000", "-macalg", "sha256",
       "-passout", "env:"+envP12Pass, "-passin", "env:"+envUserPass)
     if err != nil {
       return logs, errors.New("cannot export the PKCS#12 bundle.\n\nSee 'logs/ca-go.log' in the CA directory for details")
@@ -1005,8 +1059,9 @@ func IssueServer(fqdn, caPass, p12Pass string) ([]string, error) {
   if !validName(fqdn) {
     return nil, errors.New("fqdn must only contain letters, digits, '.', '-' and '_'")
   }
-  // server keys are unencrypted; keyPass is only used if a matching
-  // encrypted key file is present (should not happen)
+  // server keys are written unencrypted and parsed directly, so
+  // keyPass stays empty; it is only forwarded as the p12 export's key
+  // password
   return issueCert("server", fqdn, fqdn, "", "", caPass, p12Pass)
 }
 
@@ -1032,6 +1087,34 @@ func validEmail(s string) bool {
     return false
   }
   return strings.Contains(s[at+1:], ".") && !strings.ContainsAny(s, " \t")
+}
+
+// truncateName shortens s to the given column width, ending in an
+// ellipsis so truncation is visible.
+func truncateName(s string, width int) string {
+  r := []rune(s)
+  if len(r) <= width {
+    return s
+  }
+  return string(r[:width-1]) + "…"
+}
+
+// formatRecordHeader renders the column labels matching formatRecord.
+func formatRecordHeader() string {
+  return fmt.Sprintf("%-6s %-28s %-20s Expires    Status", "Type", "Common Name (CN)", "FQDN/Email")
+}
+
+// formatRecord renders one certificate record for the show screens
+// (CLI `ca-go show` and the TUI list), so the columns can never drift.
+// Long CN and FQDN/Email values are truncated with a visible ellipsis.
+func formatRecord(r CertRecord) string {
+  status := "Valid"
+  if r.Revoked {
+    status = "REVOKED"
+  }
+  return fmt.Sprintf("%-6s %-28s %-20s %s %s",
+    r.Kind, truncateName(r.CommonName, 28), truncateName(r.Name, 20),
+    r.NotAfter.Format("2006-01-02"), status)
 }
 
 func ListIssued() ([]CertRecord, error) {

@@ -91,13 +91,9 @@ func main() {
       fmt.Println("No certificates issued yet.")
       return
     }
+    fmt.Println(formatRecordHeader())
     for _, r := range recs {
-      status := "valid"
-      if r.Revoked {
-        status = "REVOKED"
-      }
-      fmt.Printf("%-7s %-28s %-20s expires %s [%s]\n",
-        r.Kind, r.Name, r.CommonName, r.NotAfter.Format("2006-01-02"), status)
+      fmt.Println(formatRecord(r))
     }
     return
   default:
