@@ -362,11 +362,11 @@ func runOpenSSL(stdin []byte, envPW map[string]string, args ...string) ([]byte, 
 // (AES-256, 600000-iteration PBKDF2) via the openssl CLI. envName
 // selects the password env var.
 func encryptKey(key *ecdsa.PrivateKey, pass, envName string) ([]byte, error) {
-  der, err := x509.MarshalPKCS8PrivateKey(key)
+  keyDER, err := x509.MarshalPKCS8PrivateKey(key)
   if err != nil {
     return nil, err
   }
-  pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+  pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
   return runOpenSSL(pemBytes, map[string]string{envName: pass},
     "pkcs8", "-topk8", "-v2", "aes256", "-inform", "pem",
     "-iter", "600000",
@@ -381,6 +381,12 @@ func writeEncryptedKey(key *ecdsa.PrivateKey, path, pass, envName string, detail
   }
   *detail = append(*detail, "key written: "+path)
   return os.WriteFile(path, out, 0600)
+}
+
+// errCAKey is the user-facing error when the root key cannot be read
+// or decrypted; the openssl detail is in logs/ca-go.log.
+func errCAKey() error {
+  return errors.New("cannot read the CA key. The CA passphrase seems wrong, or the key file is unreadable.\n\nSee 'logs/ca-go.log' in the CA directory for details")
 }
 
 // readPrivateKey loads a (possibly encrypted) PKCS#8 key file. envName
@@ -600,12 +606,9 @@ func RegenerateCRL(caPass string) ([]string, error) {
   if err != nil {
     return logs, err
   }
-  if err := ensureDirs(); err != nil {
-    return logs, err
-  }
   caKey, err := readPrivateKey(rootKeyPath(), caPass, envRootPass)
   if err != nil {
-    return logs, errors.New("cannot read the CA key. The CA passphrase seems wrong, or the key file is unreadable.\n\nSee 'logs/ca-go.log' in the CA directory for details")
+    return logs, errCAKey()
   }
   lk, err := lockState()
   if err != nil {
@@ -644,12 +647,9 @@ func Revoke(kind, name, caPass string) ([]string, error) {
   if err != nil {
     return logs, err
   }
-  if err := ensureDirs(); err != nil {
-    return logs, err
-  }
   caKey, err := readPrivateKey(rootKeyPath(), caPass, envRootPass)
   if err != nil {
-    return logs, errors.New("cannot read the CA key. The CA passphrase seems wrong, or the key file is unreadable.\n\nSee 'logs/ca-go.log' in the CA directory for details")
+    return logs, errCAKey()
   }
   lk, err := lockState()
   if err != nil {
@@ -762,7 +762,7 @@ func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string
   // before any key, CSR or certificate is written
   caKey, err := readPrivateKey(rootKeyPath(), caPass, envRootPass)
   if err != nil {
-    return logs, errors.New("cannot read the CA key. The CA passphrase seems wrong, or the key file is unreadable.\n\nSee 'logs/ca-go.log' in the CA directory for details")
+    return logs, errCAKey()
   }
   if err := ensureDirs(); err != nil {
     return logs, err
@@ -844,188 +844,176 @@ func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string
   }
 
   // key
-  if !keyOK {
-    key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-    if err != nil {
-      return logs, err
-    }
-    if kind == "user" {
-      if err := writeEncryptedKey(key, keyPath, keyPass, envUserPass, &detail); err != nil {
-        return logs, errors.New("cannot write the encrypted user key.\n\nSee 'logs/ca-go.log' in the CA directory for details")
-      }
-    } else {
-      der, err := x509.MarshalPKCS8PrivateKey(key)
-      if err != nil {
-        return logs, err
-      }
-      if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0600); err != nil {
-        return logs, err
-      }
-      detail = append(detail, "key written: "+keyPath)
-    }
-  }
-
-  // csr
-  if !csrOK {
-    keyData, err := os.ReadFile(keyPath)
-    if err != nil {
-      return logs, err
-    }
-    var keyObj crypto.PrivateKey
-    if kind == "user" {
-      keyObj, err = readPrivateKey(keyPath, keyPass, envUserPass)
-      if err != nil {
-        return logs, errors.New("cannot read the user key. The user passphrase seems wrong.\n\nSee 'logs/ca-go.log' in the CA directory for details")
-      }
-    } else {
-      block, _ := pem.Decode(keyData)
-      if block == nil {
-        return logs, fmt.Errorf("could not decode %s", keyPath)
-      }
-      keyObj, err = x509.ParsePKCS8PrivateKey(block.Bytes)
-    }
-    if err != nil {
-      return logs, err
-    }
-    subject := pkix.Name{Organization: []string{orgName}, CommonName: cn}
-    if kind == "user" {
-      // emailAddress goes through ExtraNames: pkix.Name has no
-      // dedicated field (OID 1.2.840.113549.1.9.1)
-      subject.ExtraNames = []pkix.AttributeTypeAndValue{{
-        Type:  asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 1},
-        Value: email,
-      }}
-    }
-    tmpl := x509.CertificateRequest{
-      Subject:            subject,
-      SignatureAlgorithm: x509.ECDSAWithSHA256,
-    }
-    if kind == "server" {
-      // SAN is what clients match against; CN alone is ignored
-      tmpl.DNSNames = []string{cn}
-    } else {
-      // same for S/MIME clients, which match on the email SAN
-      tmpl.EmailAddresses = []string{email}
-    }
-    csrDER, err := x509.CreateCertificateRequest(rand.Reader, &tmpl, keyObj)
-    if err != nil {
-      return logs, err
-    }
-    if err := os.WriteFile(csrPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}), 0600); err != nil {
-      return logs, err
-    }
-    detail = append(detail, "written: "+csrPath)
-  }
-
-  // sign
-  if !crtOK {
-    csrData, err := os.ReadFile(csrPath)
-    if err != nil {
-      return logs, err
-    }
-    block, _ := pem.Decode(csrData)
-    if block == nil {
-      return logs, fmt.Errorf("could not decode %s", csrPath)
-    }
-    csrParsed, err := x509.ParseCertificateRequest(block.Bytes)
-    if err != nil {
-      return logs, err
-    }
-    if err := csrParsed.CheckSignature(); err != nil {
-      return logs, err
-    }
-    pub, ok := csrParsed.PublicKey.(*ecdsa.PublicKey)
-    if !ok {
-      return logs, errors.New("unsupported CSR key type")
-    }
-    serial, err := newSerial()
-    if err != nil {
-      return logs, err
-    }
-    ski, err := subjectKeyId(pub)
-    if err != nil {
-      return logs, err
-    }
-    tmpl := x509.Certificate{
-      SerialNumber:          serial,
-      Subject:               csrParsed.Subject,
-      NotBefore:             time.Now().Add(-time.Hour),
-      NotAfter:              time.Now().Add(certValidity),
-      BasicConstraintsValid: true,
-      SubjectKeyId:          ski,
-      AuthorityKeyId:        caParsed.SubjectKeyId,
-      SignatureAlgorithm:    x509.ECDSAWithSHA256,
-    }
-    if kind == "server" {
-      tmpl.DNSNames = csrParsed.DNSNames
-      // digital signature only: keyEncipherment is an RSA-era usage
-      // with no meaning for ECDSA keys
-      tmpl.KeyUsage = x509.KeyUsageDigitalSignature
-      tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
-    } else {
-      tmpl.EmailAddresses = csrParsed.EmailAddresses
-      tmpl.KeyUsage = x509.KeyUsageDigitalSignature
-      tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageEmailProtection, x509.ExtKeyUsageClientAuth}
-    }
-    der, err := x509.CreateCertificate(rand.Reader, &tmpl, caParsed, csrParsed.PublicKey, caKey)
-    if err != nil {
-      return logs, err
-    }
-    if err := writePEM(crtPath, "CERTIFICATE", der, &detail); err != nil {
-      return logs, err
-    }
-
-    // chain: leaf + root; the private key must never end up in a
-    // file that gets shared with peers
-    var chain bytes.Buffer
-    for _, p := range []string{crtPath, rootCertPath()} {
-      data, err := os.ReadFile(p)
-      if err != nil {
-        return logs, err
-      }
-      chain.Write(data)
-    }
-    if err := os.WriteFile(chainPath, chain.Bytes(), 0600); err != nil {
-      return logs, err
-    }
-    detail = append(detail, "written: "+chainPath)
-
-    st.Certs = append(st.Certs, CertRecord{
-      Serial:     fmt.Sprintf("%032x", tmpl.SerialNumber),
-      Kind:       kind,
-      Name:       name,
-      CommonName: cn,
-      Email:      email,
-      NotAfter:   tmpl.NotAfter,
-    })
-    if err := saveState(st); err != nil {
-      return logs, err
-    }
-  }
-
-  // pkcs12
-  p12OK, err := exists(p12Path)
+  key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
   if err != nil {
     return logs, err
   }
-  if !p12OK {
-    out, err := runOpenSSL(nil,
-      map[string]string{envP12Pass: p12Pass, envUserPass: keyPass},
-      "pkcs12", "-export", "-name", name,
-      "-in", crtPath, "-inkey", keyPath,
-      "-certfile", rootCertPath(),
-      // the bundle carries the private key: strong KDF and MAC, like
-      // the encrypted key files
-      "-iter", "600000", "-macalg", "sha256",
-      "-passout", "env:"+envP12Pass, "-passin", "env:"+envUserPass)
-    if err != nil {
-      return logs, errors.New("cannot export the PKCS#12 bundle.\n\nSee 'logs/ca-go.log' in the CA directory for details")
+  if kind == "user" {
+    if err := writeEncryptedKey(key, keyPath, keyPass, envUserPass, &detail); err != nil {
+      return logs, errors.New("cannot write the encrypted user key.\n\nSee 'logs/ca-go.log' in the CA directory for details")
     }
-    if err := os.WriteFile(p12Path, out, 0600); err != nil {
+  } else {
+    keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+    if err != nil {
       return logs, err
     }
-    detail = append(detail, "written: "+p12Path)
+    if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0600); err != nil {
+      return logs, err
+    }
+    detail = append(detail, "key written: "+keyPath)
   }
+
+  // csr
+  keyData, err := os.ReadFile(keyPath)
+  if err != nil {
+    return logs, err
+  }
+  var keyObj crypto.PrivateKey
+  if kind == "user" {
+    keyObj, err = readPrivateKey(keyPath, keyPass, envUserPass)
+    if err != nil {
+      return logs, errors.New("cannot read the user key. The user passphrase seems wrong.\n\nSee 'logs/ca-go.log' in the CA directory for details")
+    }
+  } else {
+    block, _ := pem.Decode(keyData)
+    if block == nil {
+      return logs, fmt.Errorf("could not decode %s", keyPath)
+    }
+    keyObj, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+  }
+  if err != nil {
+    return logs, err
+  }
+  subject := pkix.Name{Organization: []string{orgName}, CommonName: cn}
+  if kind == "user" {
+    // emailAddress goes through ExtraNames: pkix.Name has no
+    // dedicated field (OID 1.2.840.113549.1.9.1)
+    subject.ExtraNames = []pkix.AttributeTypeAndValue{{
+      Type:  asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 1},
+      Value: email,
+    }}
+  }
+  csrTmpl := x509.CertificateRequest{
+    Subject:            subject,
+    SignatureAlgorithm: x509.ECDSAWithSHA256,
+  }
+  if kind == "server" {
+    // SAN is what clients match against; CN alone is ignored
+    csrTmpl.DNSNames = []string{cn}
+  } else {
+    // same for S/MIME clients, which match on the email SAN
+    csrTmpl.EmailAddresses = []string{email}
+  }
+  csrDER, err := x509.CreateCertificateRequest(rand.Reader, &csrTmpl, keyObj)
+  if err != nil {
+    return logs, err
+  }
+  if err := os.WriteFile(csrPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}), 0600); err != nil {
+    return logs, err
+  }
+  detail = append(detail, "written: "+csrPath)
+
+  // sign
+  csrData, err := os.ReadFile(csrPath)
+  if err != nil {
+    return logs, err
+  }
+  block, _ := pem.Decode(csrData)
+  if block == nil {
+    return logs, fmt.Errorf("could not decode %s", csrPath)
+  }
+  csrParsed, err := x509.ParseCertificateRequest(block.Bytes)
+  if err != nil {
+    return logs, err
+  }
+  if err := csrParsed.CheckSignature(); err != nil {
+    return logs, err
+  }
+  pub, ok := csrParsed.PublicKey.(*ecdsa.PublicKey)
+  if !ok {
+    return logs, errors.New("unsupported CSR key type")
+  }
+  serial, err := newSerial()
+  if err != nil {
+    return logs, err
+  }
+  ski, err := subjectKeyId(pub)
+  if err != nil {
+    return logs, err
+  }
+  tmpl := x509.Certificate{
+    SerialNumber:          serial,
+    Subject:               csrParsed.Subject,
+    NotBefore:             time.Now().Add(-time.Hour),
+    NotAfter:              time.Now().Add(certValidity),
+    BasicConstraintsValid: true,
+    SubjectKeyId:          ski,
+    AuthorityKeyId:        caParsed.SubjectKeyId,
+    SignatureAlgorithm:    x509.ECDSAWithSHA256,
+  }
+  if kind == "server" {
+    tmpl.DNSNames = csrParsed.DNSNames
+    // digital signature only: keyEncipherment is an RSA-era usage
+    // with no meaning for ECDSA keys
+    tmpl.KeyUsage = x509.KeyUsageDigitalSignature
+    tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
+  } else {
+    tmpl.EmailAddresses = csrParsed.EmailAddresses
+    tmpl.KeyUsage = x509.KeyUsageDigitalSignature
+    tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageEmailProtection, x509.ExtKeyUsageClientAuth}
+  }
+  der, err := x509.CreateCertificate(rand.Reader, &tmpl, caParsed, csrParsed.PublicKey, caKey)
+  if err != nil {
+    return logs, err
+  }
+  if err := writePEM(crtPath, "CERTIFICATE", der, &detail); err != nil {
+    return logs, err
+  }
+
+  // chain: leaf + root; the private key must never end up in a
+  // file that gets shared with peers
+  var chain bytes.Buffer
+  for _, p := range []string{crtPath, rootCertPath()} {
+    data, err := os.ReadFile(p)
+    if err != nil {
+      return logs, err
+    }
+    chain.Write(data)
+  }
+  if err := os.WriteFile(chainPath, chain.Bytes(), 0600); err != nil {
+    return logs, err
+  }
+  detail = append(detail, "written: "+chainPath)
+
+  st.Certs = append(st.Certs, CertRecord{
+    Serial:     fmt.Sprintf("%032x", tmpl.SerialNumber),
+    Kind:       kind,
+    Name:       name,
+    CommonName: cn,
+    Email:      email,
+    NotAfter:   tmpl.NotAfter,
+  })
+  if err := saveState(st); err != nil {
+    return logs, err
+  }
+
+  // pkcs12
+  out, err := runOpenSSL(nil,
+    map[string]string{envP12Pass: p12Pass, envUserPass: keyPass},
+    "pkcs12", "-export", "-name", name,
+    "-in", crtPath, "-inkey", keyPath,
+    "-certfile", rootCertPath(),
+    // the bundle carries the private key: strong KDF and MAC, like
+    // the encrypted key files
+    "-iter", "600000", "-macalg", "sha256",
+    "-passout", "env:"+envP12Pass, "-passin", "env:"+envUserPass)
+  if err != nil {
+    return logs, errors.New("cannot export the PKCS#12 bundle.\n\nSee 'logs/ca-go.log' in the CA directory for details")
+  }
+  if err := os.WriteFile(p12Path, out, 0600); err != nil {
+    return logs, err
+  }
+  detail = append(detail, "written: "+p12Path)
 
   appendLog(detail...)
   logs = append(logs,
@@ -1099,21 +1087,45 @@ func truncateName(s string, width int) string {
   return string(r[:width-1]) + "…"
 }
 
+// recordWidths splits the two name columns for a terminal of the
+// given width. Fixed columns (Type, date, status) plus separators and
+// the 6-space content indent leave the rest for Common Name and
+// FQDN/Email, split 50/50. The budget keeps a 2-column right margin
+// even for the widest status token, REVOKED. Width 0 (CLI without a
+// terminal) keeps the classic 28/20 layout; very narrow terminals
+// floor at 8.
+func recordWidths(termWidth int) (cnW, fqdnW int) {
+  if termWidth <= 0 {
+    return 28, 20
+  }
+  avail := termWidth - 6 - 29
+  if avail < 16 {
+    return 8, 8
+  }
+  return avail / 2, avail - avail/2
+}
+
 // formatRecordHeader renders the column labels matching formatRecord.
-func formatRecordHeader() string {
-  return fmt.Sprintf("%-6s %-28s %-20s Expires    Status", "Type", "Common Name (CN)", "FQDN/Email")
+func formatRecordHeader(termWidth int) string {
+  cnW, fqdnW := recordWidths(termWidth)
+  return fmt.Sprintf("%-6s %-*s %-*s %-10s %s",
+    "Type", cnW, truncateName("Common Name (CN)", cnW),
+    fqdnW, truncateName("FQDN/Email", fqdnW), "Expires", "Status")
 }
 
 // formatRecord renders one certificate record for the show screens
 // (CLI `ca-go show` and the TUI list), so the columns can never drift.
 // Long CN and FQDN/Email values are truncated with a visible ellipsis.
-func formatRecord(r CertRecord) string {
+// termWidth controls the dynamic name columns (0 = classic layout).
+func formatRecord(r CertRecord, termWidth int) string {
   status := "Valid"
   if r.Revoked {
     status = "REVOKED"
   }
-  return fmt.Sprintf("%-6s %-28s %-20s %s %s",
-    r.Kind, truncateName(r.CommonName, 28), truncateName(r.Name, 20),
+  cnW, fqdnW := recordWidths(termWidth)
+  return fmt.Sprintf("%-6s %-*s %-*s %s %s",
+    r.Kind, cnW, truncateName(r.CommonName, cnW),
+    fqdnW, truncateName(r.Name, fqdnW),
     r.NotAfter.Format("2006-01-02"), status)
 }
 

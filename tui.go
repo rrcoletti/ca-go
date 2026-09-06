@@ -93,6 +93,7 @@ type model struct {
   picks   []string
   pickIdx int
   lines   []string
+  recs    []CertRecord // show screen: rendered per frame at m.width
   errMsg  string
   width   int // terminal width, 0 until the first WindowSizeMsg
 }
@@ -114,6 +115,7 @@ func initialModel() model {
       f.input.SetValue(d.val)
       m.fields = append(m.fields, f)
     }
+    m.fields[0].input.Focus()
   }
   return m
 }
@@ -126,7 +128,6 @@ func newField(label, placeholder string, masked bool) field {
   if masked {
     ti.EchoMode = textinput.EchoPassword
   }
-  ti.Focus()
   return field{label: label, input: ti}
 }
 
@@ -137,11 +138,9 @@ func (m model) startForm(act action) (tea.Model, tea.Cmd) {
   m.focus = 0
   m.fields = nil
   m.errMsg = ""
-  cmds := []tea.Cmd{}
   add := func(label, placeholder string, masked bool) {
     f := newField(label, placeholder, masked)
     m.fields = append(m.fields, f)
-    cmds = append(cmds, textinput.Blink)
   }
   switch act {
   case actNewCA:
@@ -189,7 +188,8 @@ func (m model) startForm(act action) (tea.Model, tea.Cmd) {
     m.screen = scrPick
     return m, nil
   }
-  return m, tea.Batch(cmds...)
+  m.fields[0].input.Focus()
+  return m, textinput.Blink
 }
 
 // formValues returns the field values. Visible inputs are trimmed;
@@ -348,20 +348,30 @@ func wrapText(s string, width int) string {
   }
   var out []string
   for _, line := range strings.Split(s, "\n") {
-    for len(line) > width {
-      cut := strings.LastIndex(line[:width], " ")
-      if cut <= 0 {
-        cut = width
+    // rune-aware: the ellipsis in truncated rows is 3 bytes, and byte
+    // counting would wrap a line that still fits the terminal
+    r := []rune(line)
+    for len(r) > width {
+      // last space within the width, else hard cut
+      cut := width
+      for i := width; i > 0; i-- {
+        if r[i-1] == ' ' {
+          cut = i
+          break
+        }
       }
-      out = append(out, strings.TrimRight(line[:cut], " "))
-      line = strings.TrimLeft(line[cut:], " ")
+      out = append(out, strings.TrimRight(string(r[:cut]), " "))
+      r = []rune(strings.TrimLeft(string(r[cut:]), " "))
     }
-    out = append(out, line)
+    out = append(out, string(r))
   }
   return strings.Join(out, "\n")
 }
 
 func (m model) Init() tea.Cmd {
+  if m.screen == scrForm {
+    return textinput.Blink
+  }
   return nil
 }
 
@@ -395,6 +405,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
       case "enter", "esc", "q":
         m.screen = scrMenu
         m.lines = nil
+        m.recs = nil
         return m, nil
       }
     }
@@ -453,15 +464,13 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
         return m, nil
       }
       m.lines = nil
-      for _, r := range recs {
-        m.lines = append(m.lines, formatRecord(r))
+      // normalize: a CA with no issued certs yields a nil slice, and
+      // View() distinguishes "show screen" from "stale lines" by recs
+      // being non-nil
+      if recs == nil {
+        recs = []CertRecord{}
       }
-      if len(m.lines) > 0 {
-        m.lines = append([]string{formatRecordHeader()}, m.lines...)
-      }
-      if len(m.lines) == 0 {
-        m.lines = []string{"No certificates issued yet."}
-      }
+      m.recs = recs
       m.screen = scrList
       return m, nil
     }
@@ -482,6 +491,7 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
         f.input.SetValue(d.val)
         m.fields = append(m.fields, f)
       }
+      m.fields[0].input.Focus()
       return m, textinput.Blink
     }
     if act == actNewCA {
@@ -590,6 +600,7 @@ func (m model) updatePick(msg tea.Msg) (tea.Model, tea.Cmd) {
   case "enter":
     // single passphrase field, then run
     m.fields = []field{newField("CA passphrase", "", true)}
+    m.fields[0].input.Focus()
     m.focus = 0
     m.screen = scrForm
     return m, textinput.Blink
@@ -688,7 +699,19 @@ func (m model) View() string {
     body += "\n" + helpStyle.Render("  Enter or q: back to menu")
   case scrList:
     body = "\n"
-    for _, l := range m.lines {
+    lines := m.lines
+    if m.recs != nil {
+      // re-rendered every frame: a resize reshapes the table live
+      if len(m.recs) == 0 {
+        lines = []string{"No certificates issued yet."}
+      } else {
+        lines = []string{formatRecordHeader(m.width)}
+        for _, r := range m.recs {
+          lines = append(lines, formatRecord(r, m.width))
+        }
+      }
+    }
+    for _, l := range lines {
       style := normalStyle
       if strings.Contains(l, "REVOKED") {
         style = errorStyle

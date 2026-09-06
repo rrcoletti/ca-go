@@ -31,8 +31,10 @@ package main
 //   ca-go show
 //   ca-go version
 //
-// Settings (CA directory, organization, CA subject names)
-// live in ~/.config/ca-go/ca-go.conf; on first run the TUI asks for them.
+// Settings (CA directory, organization, CA subject names) live in
+// ca-go.conf inside the user config directory (~/.config/ca-go on
+// Linux, ~/Library/Application Support/ca-go on macOS); on first run
+// the TUI asks for them.
 
 import (
   "fmt"
@@ -91,9 +93,9 @@ func main() {
       fmt.Println("No certificates issued yet.")
       return
     }
-    fmt.Println(formatRecordHeader())
+    fmt.Println(formatRecordHeader(0))
     for _, r := range recs {
-      fmt.Println(formatRecord(r))
+      fmt.Println(formatRecord(r, 0))
     }
     return
   default:

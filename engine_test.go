@@ -25,6 +25,7 @@ import (
   "path/filepath"
   "strings"
   "testing"
+  "time"
 )
 
 func TestValidName(t *testing.T) {
@@ -619,13 +620,65 @@ func TestCRLNumberNeverGoesBackwards(t *testing.T) {
 // ellipsis, keeping the table aligned.
 func TestFormatRecordTruncatesLongName(t *testing.T) {
   long := "subdomain.example-with-a-very-long-name.example.com" // > 20 chars
-  row := formatRecord(CertRecord{Kind: "server", Name: long, CommonName: long})
+  row := formatRecord(CertRecord{Kind: "server", Name: long, CommonName: long}, 0)
   if !strings.Contains(row, "subdomain.example-w…") {
     t.Fatalf("expected truncated name with ellipsis, got: %q", row)
   }
-  short := formatRecord(CertRecord{Kind: "server", Name: "host.example.com", CommonName: "host.example.com"})
+  short := formatRecord(CertRecord{Kind: "server", Name: "host.example.com", CommonName: "host.example.com"}, 0)
   if !strings.Contains(short, "host.example.com ") {
     t.Fatalf("short names must not be truncated, got: %q", short)
+  }
+}
+
+func runeSliceIndex(haystack, needle []rune) int {
+  for i := 0; i+len(needle) <= len(haystack); i++ {
+    match := true
+    for j, rn := range needle {
+      if haystack[i+j] != rn {
+        match = false
+        break
+      }
+    }
+    if match {
+      return i
+    }
+  }
+  return -1
+}
+
+// The name columns split the terminal width 50/50 after the fixed
+// columns; both header and rows share the widths, so the table stays
+// aligned at any size. Width 0 keeps the classic 28/20 layout.
+func TestRecordWidthsFollowTerminal(t *testing.T) {
+  r := CertRecord{
+    Kind: "server", Name: "host.example.com", CommonName: "host.example.com",
+    NotAfter: time.Date(2028, 9, 4, 0, 0, 0, 0, time.UTC),
+  }
+  for _, w := range []int{0, 60, 80, 120, 20} {
+    row := formatRecord(r, w)
+    header := formatRecordHeader(w)
+    // the date column must start at the same rune offset in header and
+    // row; only the trailing Status/Valid token may differ in length
+    hr, rr := []rune(header), []rune(row)
+    if runeSliceIndex(hr, []rune("Expires")) != runeSliceIndex(rr, []rune("2028-09-04")) {
+      t.Fatalf("width %d: date column misaligned:\n%q\n%q", w, header, row)
+    }
+    if w == 0 {
+      if !strings.Contains(header, "Common Name (CN)      ") {
+        t.Fatalf("width 0 must keep the classic 28-wide CN column: %q", header)
+      }
+      continue
+    }
+    cnW, fqdnW := recordWidths(w)
+    // names at or under the column width must appear untruncated and
+    // left-justified, so the next column starts exactly where the
+    // header's does
+    if cnW >= len(r.CommonName) && !strings.HasPrefix(row[len(r.Kind)+1:], r.CommonName) {
+      t.Fatalf("width %d: CN column misaligned: %q", w, row)
+    }
+    if cnW < 8 || fqdnW < 8 {
+      t.Fatalf("width %d: columns below the floor: %d/%d", w, cnW, fqdnW)
+    }
   }
 }
 

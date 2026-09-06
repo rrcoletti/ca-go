@@ -386,6 +386,26 @@ func TestRevokeListSeesTUIIssuance(t *testing.T) {
   }
 }
 
+// Show on a CA with zero issued certificates must render the notice,
+// not a blank screen (a nil records slice used to fall through to the
+// stale-lines branch of View).
+func TestShowEmptyListRendersNotice(t *testing.T) {
+  chdirCA(t)
+  if _, err := NewCA("rp"); err != nil {
+    t.Fatal(err)
+  }
+  m := initialModel()
+  m.menuIdx = 6 // Show issued certificates
+  next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+  if m.screen != scrList || m.recs == nil {
+    t.Fatalf("expected list screen with normalized records, got screen=%d recs=%v", m.screen, m.recs)
+  }
+  if !strings.Contains(m.View(), "No certificates issued yet.") {
+    t.Fatal("empty list view must render the notice:\n" + m.View())
+  }
+}
+
 // Leaving "Show issued certificates" must not leak its rows into a
 // later result screen (reproduction: show list, Esc, New CA with a CA
 // already on disk).
@@ -402,8 +422,11 @@ func TestResultScreenHasNoStaleList(t *testing.T) {
   m.menuIdx = 6 // Show issued certificates
   next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
   m = next.(model)
-  if m.screen != scrList || len(m.lines) == 0 {
-    t.Fatalf("expected list screen with rows, got screen=%d lines=%d", m.screen, len(m.lines))
+  if m.screen != scrList || len(m.recs) == 0 {
+    t.Fatalf("expected list screen with rows, got screen=%d recs=%d", m.screen, len(m.recs))
+  }
+  if !strings.Contains(m.View(), "host.example.com") {
+    t.Fatal("list view must render the issued record")
   }
 
   next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc}) // back to menu

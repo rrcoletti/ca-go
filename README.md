@@ -46,13 +46,29 @@ Then build:
     cd ca-go
     go build
 
-That produces the `ca-go` binary. Run `openssl version` once before your first CA, if you are unsure what is on your PATH. Anything showing OpenSSL 3.x works, while older 1.x versions and LibreSSL might work too (considered it unsupported for ca-go). OpenSSL 3.x is what ca-go is tested against.
+That produces the `ca-go` binary. Run `openssl version` once before your first CA, if you are unsure what is on your PATH. Anything showing OpenSSL 3.x works, while older 1.x versions and LibreSSL might work too (considered unsupported for ca-go). OpenSSL 3.x is what ca-go is tested against.
+
+### Installing the binary
+
+You can leave `ca-go` in the repo, or move it somewhere on your `PATH`, for example:
+
+    echo $PATH
+
+    # then
+    mv ca-go ~/bin/
+    
+    # or
+    mv ca-go ~/.local/bin/
 
 ## First run
 
 Start the TUI with no arguments:
 
+    # in the repo
     ./ca-go
+
+    # in a PATH dir
+    ca-go
 
 On the first run, it'll ask for three things:
 
@@ -60,14 +76,14 @@ On the first run, it'll ask for three things:
 - Root CA common name (CN)
 - The directory where the CA lives (default `~/ca-go`)
 
-These are saved to `~/.config/ca-go/ca-go.conf`, which looks like this:
+These are saved to the config file `ca-go.conf` inside your user config directory: `~/.config/ca-go/ca-go.conf` on Linux, `~/Library/Application Support/ca-go/ca-go.conf` on macOS. It looks like this:
 
     # ca-go configuration
     dir = /home/you/ca-go
     org = Example
     rootCN = Example Root CA
 
-You can edit the file directly or use the **Edit configuration** option in the menu at any time, but if the CA on disk disagrees with the values you enter, ca-go refuses to save any files and tells you exactly which field differs.
+You can edit the file directly or use the **Edit configuration** option in the menu at any time, but if the CA on disk disagrees with the values you enter, ca-go will refuse to save any files and tells you which field differs.
 
 ## Creating a CA
 
