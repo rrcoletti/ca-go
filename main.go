@@ -29,7 +29,7 @@ package main
 //   ca-go revoke-server <fqdn>          CAGO_ROOT_PASS
 //   ca-go revoke-user <email>           CAGO_ROOT_PASS
 //   ca-go crl                           CAGO_ROOT_PASS
-//   ca-go show
+//   ca-go show [--quiet]
 //   ca-go version
 //
 // Settings (CA directory, organization, CA subject names) live in
@@ -51,6 +51,25 @@ func fail(err error) {
   os.Exit(1)
 }
 
+// reportSanity prints the startup sanity findings to stderr, with a
+// fix hint for the repairable ones. Silent when everything is fine.
+func reportSanity() {
+  iss, err := SanityIssues()
+  if err != nil || len(iss) == 0 {
+    return
+  }
+  fmt.Fprintln(os.Stderr, "CA sanity check found problems:")
+  for _, s := range iss {
+    fmt.Fprintln(os.Stderr, "  - "+s.Msg)
+    switch s.Kind {
+    case "p12":
+      fmt.Fprintln(os.Stderr, "    fix: re-run the issuance command (ca-go server <fqdn> or ca-go user <cn> <email>)")
+    case "chain":
+      fmt.Fprintln(os.Stderr, "    fix: run ca-go (TUI), the chain file is rebuilt there")
+    }
+  }
+}
+
 func main() {
   if err := loadConf(); err != nil {
     fail(err)
@@ -64,6 +83,7 @@ func main() {
     return
   }
 
+  reportSanity()
   var err error
   switch args[0] {
   case "help":

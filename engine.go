@@ -825,27 +825,6 @@ func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string
   if err != nil {
     return logs, err
   }
-  // duplicate guard: among VALID certificates, a user email and common
-  // name, and a server FQDN, must be unique. Revoked certificates do
-  // not block reissuing.
-  for i := range st.Certs {
-    c := &st.Certs[i]
-    if c.Kind != kind {
-      continue
-    }
-    if c.Revoked {
-      continue
-    }
-    if kind == "user" && c.CommonName == cn {
-      return logs, fmt.Errorf("a valid user certificate with common name %q already exists (issued for %s); revoke it first if you want to reissue", cn, c.Name)
-    }
-    if c.Name == name {
-      if kind == "user" {
-        return logs, fmt.Errorf("a valid user certificate for %s already exists; revoke it first if you want to reissue", name)
-      }
-      return logs, fmt.Errorf("a valid server certificate for %s already exists; revoke it first if you want to reissue", name)
-    }
-  }
   kindDir := "servers"
   if kind == "user" {
     kindDir = "users"
@@ -871,6 +850,48 @@ func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string
   crtOK, err := exists(crtPath)
   if err != nil {
     return logs, err
+  }
+  p12OK, err := exists(p12Path)
+  if err != nil {
+    return logs, err
+  }
+  // lost p12: a valid record whose key, CSR and certificate are all
+  // on disk but whose bundle is gone is repaired by re-running this
+  // command; the bundle is rebuilt from the existing files
+  for i := range st.Certs {
+    r := &st.Certs[i]
+    if r.Kind == kind && !r.Revoked && r.Name == name && keyOK && csrOK && crtOK && !p12OK {
+      if err := exportP12(name, crtPath, keyPath, p12Path, keyPass, p12Pass, envName, &detail); err != nil {
+        return logs, err
+      }
+      appendLog(detail...)
+      return []string{
+        "PKCS#12 bundle for " + name + " regenerated",
+        "",
+        "See 'logs/ca-go.log' in the CA directory for details",
+      }, nil
+    }
+  }
+  // duplicate guard: among VALID certificates, a user email and common
+  // name, and a server FQDN, must be unique. Revoked certificates do
+  // not block reissuing.
+  for i := range st.Certs {
+    c := &st.Certs[i]
+    if c.Kind != kind {
+      continue
+    }
+    if c.Revoked {
+      continue
+    }
+    if kind == "user" && c.CommonName == cn {
+      return logs, fmt.Errorf("a valid user certificate with common name %q already exists (issued for %s); revoke it first if you want to reissue", cn, c.Name)
+    }
+    if c.Name == name {
+      if kind == "user" {
+        return logs, fmt.Errorf("a valid user certificate for %s already exists; revoke it first if you want to reissue", name)
+      }
+      return logs, fmt.Errorf("a valid server certificate for %s already exists; revoke it first if you want to reissue", name)
+    }
   }
   // broken state: leftovers from an interrupted run (key without cert,
   // csr without key, ...) are an error the user resolves manually;
@@ -1048,22 +1069,9 @@ func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string
   }
 
   // pkcs12
-  out, err := runOpenSSL(nil,
-    map[string]string{envP12Pass: p12Pass, envName: keyPass},
-    "pkcs12", "-export", "-name", name,
-    "-in", crtPath, "-inkey", keyPath,
-    "-certfile", rootCertPath(),
-    // the bundle carries the private key: strong KDF and MAC, like
-    // the encrypted key files
-    "-iter", "600000", "-macalg", "sha256",
-    "-passout", "env:"+envP12Pass, "-passin", "env:"+envName)
-  if err != nil {
-    return logs, errors.New("cannot export the PKCS#12 bundle.\n\nSee 'logs/ca-go.log' in the CA directory for details")
-  }
-  if err := os.WriteFile(p12Path, out, 0600); err != nil {
+  if err := exportP12(name, crtPath, keyPath, p12Path, keyPass, p12Pass, envName, &detail); err != nil {
     return logs, err
   }
-  detail = append(detail, "written: "+p12Path)
 
   appendLog(detail...)
   logs = append(logs,
@@ -1269,4 +1277,169 @@ func ExpiryNotes(recs []CertRecord) []string {
     notes = append(notes, "EXPIRED: the CRL next update date has passed; regenerate it with 'ca-go crl'")
   }
   return notes
+}
+
+// exportP12 writes the PKCS#12 bundle for a certificate and records
+// the file in the detail log. The bundle carries the private key:
+// strong KDF and MAC, like the encrypted key files.
+func exportP12(name, crtPath, keyPath, p12Path, keyPass, p12Pass, envName string, detail *[]string) error {
+  out, err := runOpenSSL(nil,
+    map[string]string{envP12Pass: p12Pass, envName: keyPass},
+    "pkcs12", "-export", "-name", name,
+    "-in", crtPath, "-inkey", keyPath,
+    "-certfile", rootCertPath(),
+    "-iter", "600000", "-macalg", "sha256",
+    "-passout", "env:"+envP12Pass, "-passin", "env:"+envName)
+  if err != nil {
+    return errors.New("cannot export the PKCS#12 bundle.\n\nSee 'logs/ca-go.log' in the CA directory for details")
+  }
+  if err := os.WriteFile(p12Path, out, 0600); err != nil {
+    return err
+  }
+  *detail = append(*detail, "written: "+p12Path)
+  return nil
+}
+
+// SanityIssue is one finding of the startup sanity check. Kind is
+// "p12" or "chain" for findings the TUI can repair, "manual" for
+// everything else.
+type SanityIssue struct {
+  Kind    string
+  Name    string
+  KindDir string // "servers" or "users"
+  Msg     string
+}
+
+// SanityIssues compares state.json with the files on disk and reports
+// the damage: missing PKCS#12 bundles and chain files for valid
+// certificates (both repairable), missing keys or certificates
+// (manual), and artifact files with no state record (manual). A
+// missing or incomplete CA reports nothing; that is the setup
+// screen's business.
+func SanityIssues() ([]SanityIssue, error) {
+  if !identityConfigured() {
+    return nil, nil
+  }
+  if ok, err := exists(rootCertPath()); err != nil || !ok {
+    return nil, err
+  }
+  st, err := loadState()
+  if err != nil {
+    return nil, err
+  }
+  var issues []SanityIssue
+  live := map[string]bool{} // file names of live certificates
+  for _, r := range st.Certs {
+    if r.Revoked {
+      continue
+    }
+    kindDir := "servers"
+    if r.Kind == "user" {
+      kindDir = "users"
+    }
+    live[r.Name] = true
+    checks := []struct{ path, kind string }{
+      {kindDir + "/p12/" + r.Name + ".p12", "p12"},
+      {kindDir + "/certs/" + r.Name + "-chain.pem", "chain"},
+      {kindDir + "/keys/" + r.Name + ".key", "manual"},
+      {kindDir + "/certs/" + r.Name + ".crt", "manual"},
+    }
+    for _, c := range checks {
+      ok, err := exists(caPath(c.path))
+      if err != nil || ok {
+        continue
+      }
+      msg := ""
+      switch c.kind {
+      case "p12":
+        msg = "PKCS#12 bundle for " + r.Name + " is missing; it can be regenerated"
+      case "chain":
+        msg = "chain file for " + r.Name + " is missing; it can be regenerated"
+      default:
+        msg = c.path + " for " + r.Name + " is missing; revoke the certificate or restore the file manually"
+      }
+      issues = append(issues, SanityIssue{Kind: c.kind, Name: r.Name, KindDir: kindDir, Msg: msg})
+    }
+  }
+  // orphan files: artifacts without a matching state record
+  for _, kindDir := range []string{"servers", "users"} {
+    for _, sub := range []string{"keys", "csrs", "certs", "p12"} {
+      entries, err := os.ReadDir(caPath(kindDir + "/" + sub))
+      if err != nil {
+        continue
+      }
+      for _, e := range entries {
+        n := e.Name()
+        if strings.HasPrefix(n, ".") || strings.Contains(n, ".revoked.") {
+          continue
+        }
+        base := strings.TrimSuffix(strings.TrimSuffix(n, filepath.Ext(n)), "-chain")
+        if !live[base] {
+          issues = append(issues, SanityIssue{Kind: "manual", Name: base, KindDir: kindDir,
+            Msg: kindDir + "/" + sub + "/" + n + " has no state record; remove it manually if it is a leftover"})
+        }
+      }
+    }
+  }
+  return issues, nil
+}
+
+// RegenerateP12 rebuilds a missing PKCS#12 bundle from the existing
+// key and certificate of a named certificate.
+func RegenerateP12(kind, name, keyPass, p12Pass string) ([]string, error) {
+  kindDir, envName := "servers", envServerPass
+  if kind == "user" {
+    kindDir, envName = "users", envUserPass
+  }
+  keyPath := caPath(kindDir + "/keys/" + name + ".key")
+  crtPath := caPath(kindDir + "/certs/" + name + ".crt")
+  p12Path := caPath(kindDir + "/p12/" + name + ".p12")
+  if ok, err := exists(p12Path); err != nil {
+    return nil, err
+  } else if ok {
+    return nil, fmt.Errorf("PKCS#12 bundle for %s already exists", name)
+  }
+  var detail []string
+  if err := exportP12(name, crtPath, keyPath, p12Path, keyPass, p12Pass, envName, &detail); err != nil {
+    return nil, err
+  }
+  appendLog(detail...)
+  return []string{
+    "PKCS#12 bundle for " + name + " regenerated",
+    "",
+    "See 'logs/ca-go.log' in the CA directory for details",
+  }, nil
+}
+
+// RegenerateChain rebuilds a missing chain file (leaf + root) for a
+// named certificate. Needs no passphrases.
+func RegenerateChain(kind, name string) ([]string, error) {
+  kindDir := "servers"
+  if kind == "user" {
+    kindDir = "users"
+  }
+  crtPath := caPath(kindDir + "/certs/" + name + ".crt")
+  chainPath := caPath(kindDir + "/certs/" + name + "-chain.pem")
+  if ok, err := exists(chainPath); err != nil {
+    return nil, err
+  } else if ok {
+    return nil, fmt.Errorf("chain file for %s already exists", name)
+  }
+  var chain bytes.Buffer
+  for _, p := range []string{crtPath, rootCertPath()} {
+    data, err := os.ReadFile(p)
+    if err != nil {
+      return nil, err
+    }
+    chain.Write(data)
+  }
+  if err := os.WriteFile(chainPath, chain.Bytes(), 0600); err != nil {
+    return nil, err
+  }
+  appendLog("written: " + chainPath)
+  return []string{
+    "chain file for " + name + " regenerated",
+    "",
+    "See 'logs/ca-go.log' in the CA directory for details",
+  }, nil
 }

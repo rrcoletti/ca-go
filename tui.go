@@ -38,6 +38,7 @@ const (
   scrResult
   scrList
   scrConfirm
+  scrSanity
 )
 
 type action int
@@ -52,6 +53,7 @@ const (
   actShow
   actSettings
   actSetup
+  actSanityP12
 )
 
 var menuItems = []string{
@@ -97,6 +99,8 @@ type model struct {
   lines   []string
   recs    []CertRecord // show screen: rendered per frame at m.width
   moveFrom, moveTo string // pending CA move (settings dir change)
+  sanity  []SanityIssue // startup sanity check findings
+  sanIdx  int           // selected finding on the sanity screen
   errMsg  string
   width   int // terminal width, 0 until the first WindowSizeMsg
 }
@@ -119,6 +123,12 @@ func initialModel() model {
       m.fields = append(m.fields, f)
     }
     m.fields[0].input.Focus()
+    return m
+  }
+  // startup sanity check: surface missing artifacts before anything else
+  if iss, err := SanityIssues(); err == nil && len(iss) > 0 {
+    m.screen = scrSanity
+    m.sanity = iss
   }
   return m
 }
@@ -244,6 +254,10 @@ func (m model) submitForm() (model, tea.Cmd) {
     m.errMsg = "passphrase must not be empty"
     return m, nil
   }
+  if act == actSanityP12 && m.sanity[m.sanIdx].KindDir == "users" && vals[0] == "" {
+    m.errMsg = "user key passphrase must not be empty"
+    return m, nil
+  }
   if act == actServer {
     if vals[0] == "" {
       m.errMsg = "fqdn must not be empty"
@@ -344,6 +358,13 @@ func (m model) submitForm() (model, tea.Cmd) {
       lines, err = IssueServer(vals[0], vals[1], vals[3], vals[4])
     case actUser:
       lines, err = IssueUser(vals[0], vals[1], vals[2], vals[4], vals[5])
+    case actSanityP12:
+      s := m.sanity[m.sanIdx]
+      kind := "server"
+      if s.KindDir == "users" {
+        kind = "user"
+      }
+      lines, err = RegenerateP12(kind, s.Name, vals[0], vals[1])
     }
     return doneMsg{lines: lines, err: err}
   }
@@ -426,6 +447,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     case scrResult:
       switch msg.String() {
       case "enter", "esc", "q":
+        // a failed p12 repair returns to its passphrase form so the
+        // user can correct it and try again; everything else goes to
+        // the menu
+        if m.action == actSanityP12 && m.errMsg != "" && len(m.fields) > 0 {
+          m.screen = scrForm
+          m.lines = nil
+          m.errMsg = ""
+          return m, nil
+        }
         m.screen = scrMenu
         m.lines = nil
         m.errMsg = ""
@@ -441,6 +471,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
       }
     case scrConfirm:
       return m.updateConfirm(msg)
+    case scrSanity:
+      return m.updateSanity(msg)
     }
   case doneMsg:
     m.screen = scrResult
@@ -448,6 +480,76 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     if msg.err != nil {
       m.errMsg = msg.err.Error()
     }
+    return m, nil
+  }
+  return m, nil
+}
+
+// updateSanity drives the startup sanity screen: y repairs the
+// selected finding (a p12 asks for its passphrases first, a PEM chain
+// rebuilds directly), N or Enter skips, on the last finding the menu
+// follows; Esc or q continues there too. Manual findings are display
+// only.
+func (m model) updateSanity(msg tea.Msg) (tea.Model, tea.Cmd) {
+  key, ok := msg.(tea.KeyMsg)
+  if !ok {
+    return m, nil
+  }
+  switch key.String() {
+  case "up", "k":
+    m.sanIdx = (m.sanIdx - 1 + len(m.sanity)) % len(m.sanity)
+  case "down", "j":
+    m.sanIdx = (m.sanIdx + 1) % len(m.sanity)
+  case "y":
+    if m.sanIdx >= len(m.sanity) {
+      return m, nil
+    }
+    s := m.sanity[m.sanIdx]
+    if s.Kind == "p12" {
+      m.screen = scrForm
+      m.action = actSanityP12
+      m.focus = 0
+      m.errMsg = ""
+      m.fields = nil
+      // user keys are always encrypted; only server keys may be
+      // written unencrypted
+      keyLabel := "key passphrase for " + s.Name + " (empty = unencrypted key)"
+      if s.KindDir == "users" {
+        keyLabel = "key passphrase for " + s.Name
+      }
+      for _, label := range []string{
+        keyLabel,
+        "p12 export passphrase (empty = none)",
+      } {
+        m.fields = append(m.fields, newField(label, "", true))
+      }
+      m.fields[0].input.Focus()
+      return m, textinput.Blink
+    }
+    if s.Kind == "chain" {
+      m.screen = scrRunning
+      m.errMsg = ""
+      return m, func() tea.Msg {
+        kind := "server"
+        if s.KindDir == "users" {
+          kind = "user"
+        }
+        lines, err := RegenerateChain(kind, s.Name)
+        return doneMsg{lines: lines, err: err}
+      }
+    }
+  case "n", "enter":
+    // answering no to a question: move on to the next finding;
+    // on the last one, the check is done and the menu follows
+    if m.sanIdx == len(m.sanity)-1 {
+      m.screen = scrMenu
+      m.sanity = nil
+      return m, nil
+    }
+    m.sanIdx++
+  case "esc", "q":
+    m.screen = scrMenu
+    m.sanity = nil
     return m, nil
   }
   return m, nil
@@ -815,6 +917,28 @@ func (m model) View() string {
     body = m.renderForm()
   case scrPick:
     body = m.renderPick()
+  case scrSanity:
+    body = "\n      CA sanity check found problems:\n\n"
+    for i, s := range m.sanity {
+      text := s.Msg
+      switch s.Kind {
+      case "p12":
+        // the TUI asks; the CLI report wording stays factual
+        text = "PKCS#12 for " + s.Name + " is missing; do you want to regenerate it?  [y/N]"
+      case "chain":
+        text = "PEM chain for " + s.Name + " is missing; do you want to regenerate it?  [y/N]"
+      default:
+        text += "  (manual)"
+      }
+      cursor := "        "
+      style := normalStyle
+      if i == m.sanIdx {
+        cursor = "      > "
+        style = selectedStyle
+      }
+      body += style.Render(cursor+text) + "\n"
+    }
+    body += m.footer("  ↑/↓: select · y: fix · N or Enter: skip · Esc or q: continue")
   case scrConfirm:
     body = "\n"
     body += "      Move the CA from\n        " + m.moveFrom + "\n      to\n        " + m.moveTo + "\n\n"
@@ -853,7 +977,11 @@ func (m model) View() string {
         body += "      " + errorStyle.Render(line) + "\n"
       }
     }
-    body += m.footer("  Enter or q: back to menu")
+    help := "  Enter or q: back to menu"
+    if m.action == actSanityP12 && m.errMsg != "" && len(m.fields) > 0 {
+      help = "  Enter or q: back to the repair form"
+    }
+    body += m.footer(help)
   case scrList:
     body = "\n"
     lines := m.lines

@@ -591,3 +591,173 @@ func openSettingsForm(t *testing.T) model {
   }
   return m
 }
+
+func keyMsg(s string) tea.KeyMsg {
+  switch s {
+  case "enter":
+    return tea.KeyMsg{Type: tea.KeyEnter}
+  case "esc":
+    return tea.KeyMsg{Type: tea.KeyEscape}
+  case "y":
+    return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}
+  case "n":
+    return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")}
+  }
+  return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+}
+
+// The startup sanity screen: it appears when artifacts are missing,
+// the first finding is preselected so Enter works immediately, a p12
+// repair goes through the passphrase form, a chain repair runs
+// directly, and Esc continues to the menu.
+func TestSanityScreenFlow(t *testing.T) {
+  oldBase := baseDir
+  baseDir = t.TempDir()
+  t.Cleanup(func() { baseDir = oldBase })
+  oldOrg, oldRoot := orgName, rootCN
+  orgName, rootCN = "Example", "Example Root CA"
+  t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
+
+  if _, err := NewCA("rp"); err != nil {
+    t.Fatal(err)
+  }
+  if _, err := IssueServer("h.example.com", "", "rp", ""); err != nil {
+    t.Fatal(err)
+  }
+  p12 := filepath.Join(baseDir, "servers/p12/h.example.com.p12")
+  chain := filepath.Join(baseDir, "servers/certs/h.example.com-chain.pem")
+  os.Remove(p12)
+  os.Remove(chain)
+
+  m0 := initialModel()
+  if m0.screen != scrSanity || len(m0.sanity) != 2 {
+    t.Fatalf("expected sanity screen with 2 findings, got screen=%d n=%d", m0.screen, len(m0.sanity))
+  }
+  if m0.sanIdx != 0 {
+    t.Fatalf("sanIdx = %d, want 0: Enter must work without a prior keypress", m0.sanIdx)
+  }
+
+  // every content row starts at the same column, selected or not
+  v := m0.View()
+  if strings.Count(v, "do you want to regenerate it?  [y/N]") != 2 {
+    t.Errorf("p12 and chain rows must both ask the y/N question, got: %q", v)
+  }
+  for _, l := range strings.Split(v, "\n") {
+    if !strings.Contains(l, "missing") {
+      continue
+    }
+    plain := strings.ReplaceAll(l, "\x1b", "")
+    if strings.HasPrefix(strings.TrimLeft(plain, " "), ">") {
+      if !strings.HasPrefix(plain, "      > ") {
+        t.Errorf("selected row not at the common column: %q", plain)
+      }
+    } else if !strings.HasPrefix(plain, "        ") {
+      t.Errorf("unselected row not at the common column: %q", plain)
+    }
+  }
+
+  // y on the preselected p12 finding opens the passphrase form
+  m1, cmd := m0.updateSanity(keyMsg("y"))
+  mm := m1.(model)
+  if mm.screen != scrForm || mm.action != actSanityP12 || len(mm.fields) != 2 || cmd == nil {
+    t.Fatalf("enter should open the p12 passphrase form, got screen=%d action=%d fields=%d",
+      mm.screen, mm.action, len(mm.fields))
+  }
+
+  // submitting the form regenerates the bundle (full TUI path)
+  mm.fields[0].input.SetValue("rp")
+  m2, cmd2 := mm.submitForm()
+  if cmd2 == nil {
+    t.Fatal("expected a repair command")
+  }
+  dm, ok := cmd2().(doneMsg)
+  if !ok || dm.err != nil {
+    t.Fatalf("p12 repair failed: %+v", dm)
+  }
+  if _, err := os.Stat(p12); err != nil {
+    t.Fatal("p12 file not rebuilt")
+  }
+  m3, _ := m2.Update(dm)
+  if m3.(model).screen != scrResult {
+    t.Fatalf("expected result screen after repair, got %d", m3.(model).screen)
+  }
+
+  // the chain finding (now the only one) is preselected; Enter
+  // repairs it directly
+  m4 := initialModel()
+  if m4.screen != scrSanity || len(m4.sanity) != 1 {
+    t.Fatalf("expected 1 remaining finding, got screen=%d n=%d", m4.screen, len(m4.sanity))
+  }
+  m5, cmd3 := m4.updateSanity(keyMsg("y"))
+  if cmd3 == nil {
+    t.Fatal("expected a repair command for the chain finding")
+  }
+  dm2, ok := cmd3().(doneMsg)
+  if !ok || dm2.err != nil {
+    t.Fatalf("chain repair failed: %+v", dm2)
+  }
+  if _, err := os.Stat(chain); err != nil {
+    t.Fatal("chain file not rebuilt")
+  }
+  _ = m5
+
+  // Esc continues to the menu even with findings left
+  m6, _ := m4.updateSanity(keyMsg("esc"))
+  if m6.(model).screen != scrMenu {
+    t.Fatalf("expected menu after Esc, got %d", m6.(model).screen)
+  }
+
+  // Enter defaults to N on a p12 question: the selection moves on,
+  // the form does not open
+  os.Remove(filepath.Join(baseDir, "servers/p12/h.example.com.p12"))
+  mp := initialModel()
+  if mp.screen != scrSanity || mp.sanity[0].Kind != "p12" {
+    t.Fatalf("expected the p12 finding preselected, got screen=%d", mp.screen)
+  }
+  mp2, _ := mp.updateSanity(keyMsg("enter"))
+  if mp2.(model).screen != scrMenu {
+    t.Fatalf("enter on the only p12 finding must continue to the menu, got screen=%d", mp2.(model).screen)
+  }
+  // with two findings, N skips to the second instead of opening the form
+  mp4 := mp
+  mp4.sanity = []SanityIssue{mp.sanity[0], {Kind: "p12", Name: "other", KindDir: "servers"}}
+  mp4b, _ := mp4.updateSanity(keyMsg("n"))
+  if mp4b.(model).screen != scrSanity || mp4b.(model).sanIdx != 1 {
+    t.Fatalf("N must skip to the next finding, got screen=%d idx=%d", mp4b.(model).screen, mp4b.(model).sanIdx)
+  }
+  mp4c, _ := mp4b.(model).updateSanity(keyMsg("n"))
+  if mp4c.(model).screen != scrMenu {
+    t.Fatalf("N on the last finding must continue to the menu, got screen=%d", mp4c.(model).screen)
+  }
+  _ = mp2
+  mp3, _ := mp.updateSanity(keyMsg("y"))
+  if mp3.(model).screen != scrForm || mp3.(model).action != actSanityP12 {
+    t.Fatalf("y must open the p12 form, got screen=%d", mp3.(model).screen)
+  }
+  // close the check cleanly: rebuild the bundle so later sections
+  // see only their own findings
+  if _, err := RegenerateP12("server", "h.example.com", "", ""); err != nil {
+    t.Fatal(err)
+  }
+
+  // a user key is always encrypted: an empty key passphrase is
+  // rejected with an error, not submitted
+  if _, err := IssueUser("U One", "u1@example.com", "up", "rp", ""); err != nil {
+    t.Fatal(err)
+  }
+  os.Remove(filepath.Join(baseDir, "users/p12/u1@example.com.p12"))
+  mu := initialModel()
+  if mu.screen != scrSanity || len(mu.sanity) != 1 || mu.sanity[0].KindDir != "users" {
+    t.Fatalf("expected the user p12 finding, got screen=%d n=%d", mu.screen, len(mu.sanity))
+  }
+  mu2, _ := mu.updateSanity(keyMsg("y"))
+  mmu := mu2.(model)
+  if !strings.Contains(mmu.fields[0].label, "key passphrase") || strings.Contains(mmu.fields[0].label, "unencrypted") {
+    t.Fatalf("user key label must not suggest an unencrypted key: %q", mmu.fields[0].label)
+  }
+  mmu2, _ := mmu.submitForm()
+  if mmu2.screen != scrForm || !strings.Contains(mmu2.errMsg, "user key passphrase must not be empty") {
+    t.Fatalf("empty user key passphrase must be rejected, got screen=%d err=%q",
+      mmu2.screen, mmu2.errMsg)
+  }
+}

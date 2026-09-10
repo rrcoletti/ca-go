@@ -115,7 +115,7 @@ Every TUI action has a CLI equivalent. Passwords go through environment variable
     ca-go revoke-server <fqdn>      # CAGO_ROOT_PASS
     ca-go revoke-user <email>       # CAGO_ROOT_PASS
     ca-go crl                       # CAGO_ROOT_PASS
-    ca-go show
+    ca-go show [--quiet]            # --quiet omits the expiry notices, for scripts
 
 `ca-go show` prints one line per certificate, revoked ones included:
 
