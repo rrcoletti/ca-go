@@ -72,6 +72,7 @@ var (
   normalStyle   = lipgloss.NewStyle()
   errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
   okStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+  warnStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
   helpStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 )
 
@@ -711,9 +712,14 @@ func (m model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) renderForm() string {
   var b strings.Builder
   b.WriteString("\n")
-  for _, f := range m.fields {
+  for i, f := range m.fields {
+    // blank line between fields, none after the last: the footer
+    // owns the spacing before the warnings/help lines
+    if i > 0 {
+      b.WriteString("\n")
+    }
     b.WriteString("      " + f.label + ":\n")
-    b.WriteString("      " + f.input.View() + "\n\n")
+    b.WriteString("      " + f.input.View() + "\n")
   }
   if m.errMsg != "" {
     // indent and word-wrap every line: error text may span multiple
@@ -723,7 +729,7 @@ func (m model) renderForm() string {
     }
     b.WriteString("\n")
   }
-  b.WriteString(helpStyle.Render("  Enter: next/submit · Tab: next field · Esc: cancel"))
+  b.WriteString(m.footer("  Enter: next/submit · Tab: next field · Esc: cancel"))
   return b.String()
 }
 
@@ -744,13 +750,50 @@ func (m model) renderPick() string {
     }
     b.WriteString(style.Render(cursor+p) + "\n")
   }
-  b.WriteString("\n" + helpStyle.Render("  ↑/↓: select · Enter: revoke · Esc: cancel"))
+  b.WriteString(m.footer("  ↑/↓: select · Enter: revoke · Esc: cancel"))
   return b.String()
 }
 
 // frame renders the title and the screen content.
 func (m model) frame(content string) string {
   return "  " + titleStyle.Render("ca-go "+version) + "\n\n" + content
+}
+
+// expiryWarnings loads the certificate list and derives the expiry
+// warning lines shown on every screen. A CA without issued
+// certificates or without a CRL yields no warnings; read errors are
+// swallowed so the warnings can never break a screen.
+func (m model) expiryWarnings() []string {
+  recs, err := ListIssued()
+  if err != nil {
+    return nil
+  }
+  return ExpiryNotes(recs)
+}
+
+// footer appends the expiry notices and then the screen's help line
+// (empty for none). EXPIRING lines render yellow, EXPIRED lines red;
+// the layout with notices present is: main text, one empty line,
+// notices, one empty line, help line; without, just the help line
+// as before.
+func (m model) footer(help string) string {
+  s := ""
+  for _, w := range m.expiryWarnings() {
+    style := errorStyle
+    if strings.HasPrefix(w, "EXPIRING") {
+      style = warnStyle
+    }
+    for _, line := range strings.Split(wrapText(w, m.width-6), "\n") {
+      s += "\n" + style.Render("      " + line)
+    }
+  }
+  if s != "" {
+    s = s + "\n"
+  }
+  if help != "" {
+    s += "\n" + helpStyle.Render(help)
+  }
+  return s
 }
 
 func (m model) View() string {
@@ -767,7 +810,7 @@ func (m model) View() string {
       }
       body += style.Render(cursor+item) + "\n"
     }
-    body += "\n" + helpStyle.Render("  ↑/↓ or j/k: move · Enter: select · q or Esc: quit")
+    body += m.footer("  ↑/↓ or j/k: move · Enter: select · q or Esc: quit")
   case scrForm:
     body = m.renderForm()
   case scrPick:
@@ -785,7 +828,7 @@ func (m model) View() string {
       }
       body += style.Render(cursor+opt) + "\n"
     }
-    body += "\n" + helpStyle.Render("  ↑/↓: select · Enter: confirm · Esc: back to the form")
+    body += m.footer("  ↑/↓: select · Enter: confirm · Esc: back to the form")
   case scrRunning:
     body = "\n      Working..."
   case scrResult:
@@ -810,7 +853,7 @@ func (m model) View() string {
         body += "      " + errorStyle.Render(line) + "\n"
       }
     }
-    body += "\n" + helpStyle.Render("  Enter or q: back to menu")
+    body += m.footer("  Enter or q: back to menu")
   case scrList:
     body = "\n"
     lines := m.lines
@@ -826,25 +869,37 @@ func (m model) View() string {
       }
     }
     for _, l := range lines {
-      style := normalStyle
-      if strings.Contains(l, "REVOKED") {
-        style = errorStyle
-      }
+      // revoked rows: the whole line red, as they have always been
+      allRed := strings.Contains(l, "REVOKED")
       for _, line := range strings.Split(wrapText(l, m.width-6), "\n") {
-        // valid rows: color only the trailing status token; revoked
-        // rows stay entirely red as before
-        text, st := line, ""
-        if !strings.Contains(l, "REVOKED") && strings.HasSuffix(line, " Valid") {
-          text, st = strings.TrimSuffix(line, " Valid"), "Valid"
+        // other rows render plain except the trailing status token:
+        // Valid green, EXPIRING yellow, EXPIRED red
+        if strings.HasPrefix(l, "WARNING") {
+          continue // notices come from the shared footer, once per screen
         }
-        out := style.Render(text)
+        if allRed {
+          body += "      " + errorStyle.Render(line) + "\n"
+          continue
+        }
+        text, st := line, ""
+        tokenStyle := okStyle
+        if strings.HasSuffix(line, " Valid") {
+          text, st = strings.TrimSuffix(line, " Valid"), "Valid"
+        } else if strings.HasSuffix(line, " EXPIRING") {
+          text, st = strings.TrimSuffix(line, " EXPIRING"), "EXPIRING"
+          tokenStyle = warnStyle
+        } else if strings.HasSuffix(line, " EXPIRED") {
+          text, st = strings.TrimSuffix(line, " EXPIRED"), "EXPIRED"
+          tokenStyle = errorStyle
+        }
+        out := normalStyle.Render(text)
         if st != "" {
-          out += " " + okStyle.Render(st)
+          out += " " + tokenStyle.Render(st)
         }
         body += "      " + out + "\n"
       }
     }
-    body += "\n" + helpStyle.Render("  Enter or q: back to menu")
+    body += m.footer("  Enter or q: back to menu")
   }
   return m.frame(body)
 }

@@ -71,9 +71,11 @@ func statePath() string     { return caPath("state.json") }
 func stateLockPath() string { return caPath("state.lock") }
 
 const (
-  certValidity  = 730 * 24 * time.Hour
-  caValidity    = 10 * 365 * 24 * time.Hour
-  rootCrlWindow = 90 * 24 * time.Hour
+  certValidity    = 730 * 24 * time.Hour
+  caValidity      = 10 * 365 * 24 * time.Hour
+  rootCrlWindow   = 90 * 24 * time.Hour
+  expiryWarnDays  = 30
+  expiryWarn      = time.Duration(expiryWarnDays) * 24 * time.Hour
   envRootPass   = "CAGO_ROOT_PASS"
   envUserPass   = "CAGO_USER_PASS"
   envServerPass = "CAGO_SERVER_PASS"
@@ -1129,14 +1131,14 @@ func truncateName(s string, width int) string {
 // given width. Fixed columns (Type, date, status) plus separators and
 // the 6-space content indent leave the rest for Common Name and
 // FQDN/Email, split 50/50. The budget keeps a 2-column right margin
-// even for the widest status token, REVOKED. Width 0 (CLI without a
+// even for the widest status token, EXPIRING. Width 0 (CLI without a
 // terminal) keeps the classic 28/20 layout; very narrow terminals
 // floor at 8.
 func recordWidths(termWidth int) (cnW, fqdnW int) {
   if termWidth <= 0 {
     return 28, 20
   }
-  avail := termWidth - 6 - 29
+  avail := termWidth - 6 - 30
   if avail < 16 {
     return 8, 8
   }
@@ -1151,15 +1153,27 @@ func formatRecordHeader(termWidth int) string {
     fqdnW, truncateName("FQDN/Email", fqdnW), "Expires", "Status")
 }
 
+// recordStatus is the display status for a certificate: revoked,
+// expired, expiring within the warning window, or valid.
+func recordStatus(r CertRecord, now time.Time) string {
+  if r.Revoked {
+    return "REVOKED"
+  }
+  if !now.After(r.NotAfter) && !r.NotAfter.After(now.Add(expiryWarn)) {
+    return "EXPIRING"
+  }
+  if now.After(r.NotAfter) {
+    return "EXPIRED"
+  }
+  return "Valid"
+}
+
 // formatRecord renders one certificate record for the show screens
 // (CLI `ca-go show` and the TUI list), so the columns can never drift.
 // Long CN and FQDN/Email values are truncated with a visible ellipsis.
 // termWidth controls the dynamic name columns (0 = classic layout).
 func formatRecord(r CertRecord, termWidth int) string {
-  status := "Valid"
-  if r.Revoked {
-    status = "REVOKED"
-  }
+  status := recordStatus(r, time.Now())
   cnW, fqdnW := recordWidths(termWidth)
   return fmt.Sprintf("%-6s %-*s %-*s %s %s",
     r.Kind, cnW, truncateName(r.CommonName, cnW),
@@ -1173,4 +1187,50 @@ func ListIssued() ([]CertRecord, error) {
     return nil, err
   }
   return st.Certs, nil
+}
+
+// crlStale reports whether the CRL's NextUpdate date has passed.
+// A missing or unreadable CRL is not reported here: CRL consumers fail
+// loudly on their own in that case, and every CA write recreates it.
+func crlStale() bool {
+  data, err := os.ReadFile(rootCrlPath())
+  if err != nil {
+    return false
+  }
+  block, _ := pem.Decode(data)
+  if block == nil {
+    return false
+  }
+  rl, err := x509.ParseRevocationList(block.Bytes)
+  if err != nil {
+    return false
+  }
+  return time.Now().After(rl.NextUpdate)
+}
+
+// ExpiryNotes returns the notice lines shown under the certificate
+// table on the show screens and in the TUI footer: expiring items are
+// prefixed EXPIRING, expired ones EXPIRED (including a stale CRL).
+func ExpiryNotes(recs []CertRecord) []string {
+  now := time.Now()
+  expiring, expired := 0, 0
+  for _, r := range recs {
+    switch recordStatus(r, now) {
+    case "EXPIRING":
+      expiring++
+    case "EXPIRED":
+      expired++
+    }
+  }
+  var notes []string
+  if expired > 0 {
+    notes = append(notes, fmt.Sprintf("EXPIRED: %d certificate(s) expired; reissue or revoke them", expired))
+  }
+  if expiring > 0 {
+    notes = append(notes, fmt.Sprintf("EXPIRING: %d certificate(s) expire within %d days", expiring, expiryWarnDays))
+  }
+  if crlStale() {
+    notes = append(notes, "EXPIRED: the CRL next update date has passed; regenerate it with 'ca-go crl'")
+  }
+  return notes
 }

@@ -89,6 +89,12 @@ func main() {
   case "crl":
     _, err = RegenerateCRL(os.Getenv(envRootPass))
   case "show":
+    quiet := false
+    if len(args) == 2 {
+      need(args[1] == "--quiet", "usage: ca-go show [--quiet]")
+      quiet = true
+    }
+    need(len(args) <= 2, "usage: ca-go show [--quiet]")
     recs, e := ListIssued()
     if e != nil {
       fail(e)
@@ -100,6 +106,11 @@ func main() {
     fmt.Println(formatRecordHeader(0))
     for _, r := range recs {
       fmt.Println(formatRecord(r, 0))
+    }
+    if !quiet {
+      for _, n := range ExpiryNotes(recs) {
+        fmt.Println(n)
+      }
     }
     return
   default:
@@ -130,7 +141,9 @@ func printHelp() {
   ca-go revoke-server <fqdn>
   ca-go revoke-user <email>
   ca-go crl                 regenerate the CRL
-  ca-go show                list issued certificates
+  ca-go show [--quiet]      list issued certificates; --quiet omits
+                            the expiry notices, for scripts that
+                            filter or redirect the table
   ca-go version
 
 Passwords are read from environment variables, never the command line:

@@ -20,6 +20,10 @@ import (
   "crypto/ecdsa"
   "crypto/elliptic"
   "crypto/rand"
+  "crypto/x509"
+  "crypto/x509/pkix"
+  "encoding/pem"
+  "math/big"
   "os"
   "os/exec"
   "path/filepath"
@@ -680,6 +684,125 @@ func TestRecordWidthsFollowTerminal(t *testing.T) {
       t.Fatalf("width %d: columns below the floor: %d/%d", w, cnW, fqdnW)
     }
   }
+}
+
+// The status column reflects validity: revoked certificates show
+// REVOKED, expired ones EXPIRED, and valid ones inside the warning
+// window EXPIRING; everything else stays Valid. The boundary is
+// inclusive: a certificate expiring exactly 30 days out counts as
+// expiring.
+func TestRecordStatus(t *testing.T) {
+  now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+  cases := []struct {
+    name string
+    rec  CertRecord
+    want string
+  }{
+    {"valid", CertRecord{NotAfter: now.Add(400 * 24 * time.Hour)}, "Valid"},
+    {"just over the window", CertRecord{NotAfter: now.Add(30*24*time.Hour + time.Minute)}, "Valid"},
+    {"exactly 30 days out", CertRecord{NotAfter: now.Add(30 * 24 * time.Hour)}, "EXPIRING"},
+    {"tomorrow", CertRecord{NotAfter: now.Add(24 * time.Hour)}, "EXPIRING"},
+    {"expired", CertRecord{NotAfter: now.Add(-time.Minute)}, "EXPIRED"},
+    {"revoked overrides everything", CertRecord{NotAfter: now.Add(-time.Minute), Revoked: true}, "REVOKED"},
+    {"revoked but still valid", CertRecord{NotAfter: now.Add(400 * 24 * time.Hour), Revoked: true}, "REVOKED"},
+  }
+  for _, c := range cases {
+    if got := recordStatus(c.rec, now); got != c.want {
+      t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+    }
+  }
+}
+
+// formatRecord renders the derived statuses so the show screens flag
+// expiring and expired certificates in the table itself.
+func TestFormatRecordShowsExpiryStatus(t *testing.T) {
+  soon := time.Now().Add(10 * 24 * time.Hour)
+  past := time.Now().Add(-24 * time.Hour)
+  if row := formatRecord(CertRecord{Kind: "server", Name: "h", CommonName: "h", NotAfter: soon}, 0); !strings.Contains(row, "EXPIRING") {
+    t.Fatalf("expected EXPIRING in row, got %q", row)
+  }
+  if row := formatRecord(CertRecord{Kind: "server", Name: "h", CommonName: "h", NotAfter: past}, 0); !strings.Contains(row, "EXPIRED") {
+    t.Fatalf("expected EXPIRED in row, got %q", row)
+  }
+}
+
+// ExpiryNotes distinguishes severity by prefix: expiring certificates
+// yield EXPIRING lines, expired ones EXPIRED, ignoring revoked ones;
+// a stale CRL is also EXPIRED.
+func TestExpiryNotes(t *testing.T) {
+  oldBase := baseDir
+  baseDir = t.TempDir()
+  t.Cleanup(func() { baseDir = oldBase })
+
+  now := time.Now()
+  recs := []CertRecord{
+    {Kind: "server", Name: "fresh", NotAfter: now.Add(400 * 24 * time.Hour)},
+    {Name: "gone", NotAfter: now.Add(-time.Hour), Revoked: true},
+  }
+  if notes := ExpiryNotes(recs); len(notes) != 0 {
+    t.Fatalf("healthy CA with fresh CRL must be silent, got %q", notes)
+  }
+
+  recs = []CertRecord{
+    {Name: "a", NotAfter: now.Add(10 * 24 * time.Hour)},
+    {Name: "b", NotAfter: now.Add(-time.Hour)},
+    {Name: "c", NotAfter: now.Add(-2 * time.Hour), Revoked: true},
+  }
+  notes := ExpiryNotes(recs)
+  if len(notes) != 2 {
+    t.Fatalf("expected expiring + expired notes, got %q", notes)
+  }
+  if !strings.Contains(notes[0], "EXPIRED: 1 certificate(s) expired") || !strings.Contains(notes[1], "EXPIRING: 1 certificate(s) expire within 30 days") {
+    t.Fatalf("unexpected note wording: %q", notes)
+  }
+
+  // a CRL whose NextUpdate date has passed adds the regenerate note
+  if err := os.MkdirAll(filepath.Dir(rootCrlPath()), 0700); err != nil {
+    t.Fatal(err)
+  }
+  if err := os.WriteFile(rootCrlPath(), staleCRL(t), 0600); err != nil {
+    t.Fatal(err)
+  }
+  notes = ExpiryNotes(nil)
+  if len(notes) != 1 || !strings.Contains(notes[0], "EXPIRED: the CRL") {
+    t.Fatalf("expected only the CRL notice, got %q", notes)
+  }
+}
+
+// staleCRL builds a signed CRL whose NextUpdate date is in the past,
+// signed by a throwaway self-signed CA, for crlStale() tests.
+func staleCRL(t *testing.T) []byte {
+  t.Helper()
+  key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+  if err != nil {
+    t.Fatal(err)
+  }
+  tmpl := &x509.Certificate{
+    SerialNumber: big.NewInt(1),
+    Subject:      pkix.Name{CommonName: "stale test CA"},
+    NotBefore:    time.Now().Add(-24 * time.Hour),
+    NotAfter:     time.Now().Add(24 * time.Hour),
+    KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+    IsCA:         true,
+    BasicConstraintsValid: true,
+  }
+  der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+  if err != nil {
+    t.Fatal(err)
+  }
+  ca, err := x509.ParseCertificate(der)
+  if err != nil {
+    t.Fatal(err)
+  }
+  rlDer, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+    Number:     big.NewInt(1),
+    ThisUpdate: time.Now().Add(-2 * time.Hour),
+    NextUpdate: time.Now().Add(-time.Hour),
+  }, ca, key)
+  if err != nil {
+    t.Fatal(err)
+  }
+  return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: rlDer})
 }
 
 // The encrypted key must carry a strong PBKDF2 iteration count; the
