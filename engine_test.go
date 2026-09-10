@@ -112,6 +112,44 @@ func TestConfRoundTrip(t *testing.T) {
   }
 }
 
+// An inline comment after a value is stripped before the value is
+// used, so "dir = /x # note" yields "/x". The cut happens at the
+// first '#', with or without whitespace before it.
+func TestLoadConfInlineComment(t *testing.T) {
+  home := t.TempDir()
+  t.Setenv("XDG_CONFIG_HOME", home)
+  t.Setenv("HOME", home)
+  dir := home + "/ca-go"
+  if err := os.MkdirAll(dir, 0700); err != nil {
+    t.Fatal(err)
+  }
+  conf := dir + "/ca-go.conf"
+  content := "# ca-go configuration\n" +
+    "dir = /data/my-ca # moved after the SSD reorg\n" +
+    "org = Example#tight\n" +
+    "rootCN = Example Root CA\n"
+  if err := os.WriteFile(conf, []byte(content), 0600); err != nil {
+    t.Fatal(err)
+  }
+
+  oldBase, oldOrg, oldCN := baseDir, orgName, rootCN
+  t.Cleanup(func() { baseDir, orgName, rootCN = oldBase, oldOrg, oldCN })
+
+  baseDir, orgName, rootCN = defaultBaseDir(), "", ""
+  if err := loadConf(); err != nil {
+    t.Fatal(err)
+  }
+  if baseDir != "/data/my-ca" {
+    t.Fatalf("dir = %q, want /data/my-ca (comment stripped)", baseDir)
+  }
+  if orgName != "Example" {
+    t.Fatalf("org = %q, want Example (comment stripped even without space)", orgName)
+  }
+  if rootCN != "Example Root CA" {
+    t.Fatalf("rootCN = %q, want Example Root CA", rootCN)
+  }
+}
+
 // Issuing must refuse when the CA on disk does not match the configured
 // identity, and must not create anything. With a consistent identity it
 // proceeds normally.

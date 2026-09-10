@@ -265,6 +265,8 @@ func confPath() (string, error) {
 }
 
 // loadConf reads the optional config file; unknown keys are ignored.
+// An inline comment after a value ("dir = /x # note") is stripped,
+// with a warning on stderr so the truncation never happens silently.
 func loadConf() error {
   p, err := confPath()
   if err != nil {
@@ -277,6 +279,7 @@ func loadConf() error {
   if err != nil {
     return err
   }
+  warned := false
   for _, line := range strings.Split(string(data), "\n") {
     line = strings.TrimSpace(line)
     if line == "" || strings.HasPrefix(line, "#") {
@@ -285,6 +288,13 @@ func loadConf() error {
     k, v, ok := strings.Cut(line, "=")
     if !ok {
       continue
+    }
+    if i := strings.IndexByte(v, '#'); i >= 0 {
+      if !warned {
+        fmt.Fprintln(os.Stderr, "warning:", p+": everything after '#' in a value is treated as a comment")
+        warned = true
+      }
+      v = v[:i]
     }
     v = strings.TrimSpace(v)
     if v == "" {
@@ -1066,6 +1076,32 @@ func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string
 // validName guards names that become file names: a strict whitelist
 // with no separators and no leading dot, so a crafted FQDN or email
 // cannot escape the artifact directories.
+// validDir guards a CA directory path typed into the TUI: it must be
+// an absolute path whose every character is shell-friendly (letters,
+// digits, / . - _ only: no spaces, no '#', no quoting or expansion
+// metacharacters, no control characters), so the path can round-trip
+// through the conf file and every shell context unquoted.
+func validDir(s string) bool {
+  if !filepath.IsAbs(s) {
+    return false
+  }
+  // reject trailing (and leading) whitespace and lone '/' variants
+  if s != filepath.Clean(s) || strings.TrimSpace(s) != s {
+    return false
+  }
+  for _, r := range s {
+    ok := r == '/' ||
+      r >= 'a' && r <= 'z' ||
+      r >= 'A' && r <= 'Z' ||
+      r >= '0' && r <= '9' ||
+      r == '.' || r == '-' || r == '_'
+    if !ok {
+      return false
+    }
+  }
+  return true
+}
+
 func validName(s string) bool {
   if s == "" || strings.ContainsAny(s, `/\\`) || strings.HasPrefix(s, ".") {
     return false

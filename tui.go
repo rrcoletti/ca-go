@@ -261,8 +261,8 @@ func (m model) submitForm() (model, tea.Cmd) {
         return m, nil
       }
     }
-    if !filepath.IsAbs(vals[2]) {
-      m.errMsg = "directory must be an absolute path"
+    if !validDir(vals[2]) {
+      m.errMsg = "directory must be an absolute path using only letters, digits, '/', '.', '-' and '_'"
       return m, nil
     }
     // Edit configuration only: the identity must match the CA wherever
