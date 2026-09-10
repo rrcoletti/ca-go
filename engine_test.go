@@ -50,7 +50,7 @@ func TestIssueServerRejectsTraversal(t *testing.T) {
   baseDir = dir
   t.Cleanup(func() { baseDir = old })
 
-  if _, err := IssueServer("../../evil", "pw", ""); err == nil {
+  if _, err := IssueServer("../../evil", "", "pw", ""); err == nil {
     t.Fatal("expected error for path-traversing fqdn")
   }
   entries, err := os.ReadDir(dir)
@@ -128,7 +128,7 @@ func TestIssueRefusesIdentityMismatch(t *testing.T) {
   if err != nil {
     t.Fatal(err)
   }
-  _, err = IssueServer("host.example.com", "rp", "")
+  _, err = IssueServer("host.example.com", "", "rp", "")
   if err == nil {
     t.Fatal("expected refusal on identity mismatch")
   }
@@ -147,7 +147,7 @@ func TestIssueRefusesIdentityMismatch(t *testing.T) {
   }
 
   orgName = "Example"
-  if _, err := IssueServer("host.example.com", "rp", ""); err != nil {
+  if _, err := IssueServer("host.example.com", "", "rp", ""); err != nil {
     t.Fatalf("issue with consistent identity failed: %v", err)
   }
 }
@@ -161,7 +161,7 @@ func TestIssueWithoutCA(t *testing.T) {
   orgName, rootCN = "Example", "Example Root CA"
   t.Cleanup(func() { orgName, rootCN = oldOrg, oldRoot })
 
-  _, err := IssueServer("host.example.com", "rp", "")
+  _, err := IssueServer("host.example.com", "", "rp", "")
   if err == nil || !strings.Contains(err.Error(), "no CA exists") {
     t.Fatalf("expected 'no CA exists' error, got: %v", err)
   }
@@ -199,7 +199,7 @@ func TestWrongCAPassWritesNothing(t *testing.T) {
     t.Fatal(err)
   }
 
-  _, err := IssueServer("host.example.com", "WRONG", "")
+  _, err := IssueServer("host.example.com", "", "WRONG", "")
   if err == nil {
     t.Fatal("expected wrong-passphrase error")
   }
@@ -223,7 +223,7 @@ func TestWrongCAPassWritesNothing(t *testing.T) {
   }
 
   // correct passphrase still issues fine afterwards
-  if _, err := IssueServer("host.example.com", "rp", ""); err != nil {
+  if _, err := IssueServer("host.example.com", "", "rp", ""); err != nil {
     t.Fatalf("issuance with correct passphrase failed: %v", err)
   }
 }
@@ -307,10 +307,10 @@ func TestServerReissueAfterRevocation(t *testing.T) {
   if _, err := NewCA("rp"); err != nil {
     t.Fatal(err)
   }
-  if _, err := IssueServer("host.example.com", "rp", ""); err != nil {
+  if _, err := IssueServer("host.example.com", "", "rp", ""); err != nil {
     t.Fatal(err)
   }
-  _, err := IssueServer("host.example.com", "rp", "")
+  _, err := IssueServer("host.example.com", "", "rp", "")
   if err == nil || !strings.Contains(err.Error(), "already exists") {
     t.Fatalf("expected duplicate refusal, got: %v", err)
   }
@@ -318,7 +318,7 @@ func TestServerReissueAfterRevocation(t *testing.T) {
     t.Fatal(err)
   }
   checkRevokedArtifacts(t, baseDir, "host.example.com")
-  if _, err := IssueServer("host.example.com", "rp", ""); err != nil {
+  if _, err := IssueServer("host.example.com", "", "rp", ""); err != nil {
     t.Fatalf("reissue after revocation should work: %v", err)
   }
   // state keeps the revoked record and adds the new one
@@ -392,7 +392,7 @@ func TestShortSuccessMessages(t *testing.T) {
   }
 
   want = []string{"certificate for host.example.com issued", "", "See 'logs/ca-go.log' in the CA directory for details"}
-  lines, err = IssueServer("host.example.com", "rp", "")
+  lines, err = IssueServer("host.example.com", "", "rp", "")
   if err != nil {
     t.Fatal(err)
   }
@@ -503,7 +503,7 @@ func TestServerCertHasSAN(t *testing.T) {
   if _, err := NewCA("rp"); err != nil {
     t.Fatal(err)
   }
-  if _, err := IssueServer("host.example.com", "rp", ""); err != nil {
+  if _, err := IssueServer("host.example.com", "", "rp", ""); err != nil {
     t.Fatal(err)
   }
   cert, err := readCert(filepath.Join(baseDir, "servers/certs/host.example.com.crt"))
@@ -564,7 +564,7 @@ func TestHalfCreatedCertRejected(t *testing.T) {
   if err := os.WriteFile(keyPath, []byte("junk"), 0600); err != nil {
     t.Fatal(err)
   }
-  _, err := IssueServer("host.example.com", "rp", "")
+  _, err := IssueServer("host.example.com", "", "rp", "")
   if err == nil {
     t.Fatal("expected half-created certificate error")
   }
@@ -734,5 +734,50 @@ func TestUserCertHasEmailSAN(t *testing.T) {
   }
   if len(cert.EmailAddresses) != 1 || cert.EmailAddresses[0] != "user@example.com" {
     t.Fatalf("expected SAN email:user@example.com, got %v", cert.EmailAddresses)
+  }
+}
+
+// A server key passphrase is optional: non-empty encrypts the key like
+// a user key (and feeds the p12 export); empty keeps the plain key.
+func TestServerKeyOptionalPassphrase(t *testing.T) {
+  chdirCA(t)
+  if _, err := NewCA("rp"); err != nil {
+    t.Fatal(err)
+  }
+
+  lines, err := IssueServer("enc.example.com", "skp", "rp", "p12p")
+  if err != nil {
+    t.Fatalf("issue with encrypted key: %v\n%s", err, strings.Join(lines, "\n"))
+  }
+  encPath := caPath("servers/keys/enc.example.com.key")
+  encPEM, err := os.ReadFile(encPath)
+  if err != nil {
+    t.Fatal(err)
+  }
+  if !strings.Contains(string(encPEM), "ENCRYPTED PRIVATE KEY") {
+    t.Fatal("expected an encrypted server key PEM")
+  }
+  if _, err := readPrivateKey(encPath, "skp", envServerPass); err != nil {
+    t.Fatalf("encrypted server key must open with its passphrase: %v", err)
+  }
+  for _, f := range []string{
+    caPath("servers/certs/enc.example.com.crt"),
+    caPath("servers/certs/enc.example.com-chain.pem"),
+    caPath("servers/p12/enc.example.com.p12"),
+  } {
+    if ok, err := exists(f); err != nil || !ok {
+      t.Fatalf("missing artifact %s", f)
+    }
+  }
+
+  if _, err := IssueServer("plain.example.com", "", "rp", "p12p"); err != nil {
+    t.Fatalf("issue with unencrypted key: %v", err)
+  }
+  plainPEM, err := os.ReadFile(caPath("servers/keys/plain.example.com.key"))
+  if err != nil {
+    t.Fatal(err)
+  }
+  if !strings.Contains(string(plainPEM), "PRIVATE KEY") || strings.Contains(string(plainPEM), "ENCRYPTED") {
+    t.Fatal("expected an unencrypted server key PEM")
   }
 }

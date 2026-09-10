@@ -23,7 +23,8 @@ package main
 // (passwords via environment variables, never on the command line):
 //
 //   ca-go new-ca                        CAGO_ROOT_PASS
-//   ca-go server <fqdn>                 CAGO_ROOT_PASS, CAGO_P12_PASS (optional)
+//   ca-go server <fqdn>                 CAGO_ROOT_PASS, CAGO_SERVER_PASS (optional),
+//                                       CAGO_P12_PASS (optional)
 //   ca-go user <cn> <email>             CAGO_USER_PASS, CAGO_ROOT_PASS, CAGO_P12_PASS (optional)
 //   ca-go revoke-server <fqdn>          CAGO_ROOT_PASS
 //   ca-go revoke-user <email>           CAGO_ROOT_PASS
@@ -72,7 +73,7 @@ func main() {
     _, err = NewCA(os.Getenv(envRootPass))
   case "server":
     need(len(args) == 2, "usage: ca-go server <fqdn>")
-    _, err = IssueServer(args[1], os.Getenv(envRootPass), os.Getenv(envP12Pass))
+    _, err = IssueServer(args[1], os.Getenv(envServerPass), os.Getenv(envRootPass), os.Getenv(envP12Pass))
   case "user":
     need(len(args) == 3, "usage: ca-go user <cn> <email>")
     _, err = IssueUser(args[1], args[2], os.Getenv(envUserPass), os.Getenv(envRootPass), os.Getenv(envP12Pass))

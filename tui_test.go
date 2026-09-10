@@ -283,12 +283,12 @@ func TestEditConfAfterServerFormIsClean(t *testing.T) {
   m.menuIdx = 2 // New server certificate
   next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
   m = next.(model)
-  if len(m.fields) != 3 {
-    t.Fatalf("expected 3 server-cert fields, got %d", len(m.fields))
+  if len(m.fields) != 5 {
+    t.Fatalf("expected 5 server-cert fields, got %d", len(m.fields))
   }
   next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc}) // back to menu, fields retained
   m = next.(model)
-  if len(m.fields) != 3 {
+  if len(m.fields) != 5 {
     t.Fatalf("precondition: fields should still exist, got %d", len(m.fields))
   }
 
@@ -414,7 +414,7 @@ func TestResultScreenHasNoStaleList(t *testing.T) {
   if _, err := NewCA("rp"); err != nil {
     t.Fatal(err)
   }
-  if _, err := IssueServer("host.example.com", "rp", ""); err != nil {
+  if _, err := IssueServer("host.example.com", "", "rp", ""); err != nil {
     t.Fatal(err)
   }
 

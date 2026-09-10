@@ -76,6 +76,7 @@ const (
   rootCrlWindow = 90 * 24 * time.Hour
   envRootPass   = "CAGO_ROOT_PASS"
   envUserPass   = "CAGO_USER_PASS"
+  envServerPass = "CAGO_SERVER_PASS"
   envP12Pass    = "CAGO_P12_PASS"
 )
 
@@ -747,7 +748,9 @@ func Revoke(kind, name, caPass string) ([]string, error) {
 }
 
 // issueCert is the shared path for server and user certificates.
-// User keys are passphrase-protected PKCS#8; server keys are plain.
+// A non-empty keyPass yields a passphrase-protected PKCS#8 key
+// (user keys always, server keys optionally); an empty one writes the
+// key unencrypted.
 func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string, error) {
   logs := []string{}
   if !identityConfigured() {
@@ -804,6 +807,10 @@ func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string
   if kind == "user" {
     kindDir = "users"
   }
+  envName := envUserPass
+  if kind == "server" {
+    envName = envServerPass
+  }
   keyPath := caPath(kindDir + "/keys/" + name + ".key")
   csrPath := caPath(kindDir + "/csrs/" + name + ".csr")
   crtPath := caPath(kindDir + "/certs/" + name + ".crt")
@@ -848,9 +855,9 @@ func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string
   if err != nil {
     return logs, err
   }
-  if kind == "user" {
-    if err := writeEncryptedKey(key, keyPath, keyPass, envUserPass, &detail); err != nil {
-      return logs, errors.New("cannot write the encrypted user key.\n\nSee 'logs/ca-go.log' in the CA directory for details")
+  if keyPass != "" {
+    if err := writeEncryptedKey(key, keyPath, keyPass, envName, &detail); err != nil {
+      return logs, errors.New("cannot write the encrypted " + kind + " key.\n\nSee 'logs/ca-go.log' in the CA directory for details")
     }
   } else {
     keyDER, err := x509.MarshalPKCS8PrivateKey(key)
@@ -869,10 +876,10 @@ func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string
     return logs, err
   }
   var keyObj crypto.PrivateKey
-  if kind == "user" {
-    keyObj, err = readPrivateKey(keyPath, keyPass, envUserPass)
+  if keyPass != "" {
+    keyObj, err = readPrivateKey(keyPath, keyPass, envName)
     if err != nil {
-      return logs, errors.New("cannot read the user key. The user passphrase seems wrong.\n\nSee 'logs/ca-go.log' in the CA directory for details")
+      return logs, errors.New("cannot read the " + kind + " key. The key passphrase seems wrong.\n\nSee 'logs/ca-go.log' in the CA directory for details")
     }
   } else {
     block, _ := pem.Decode(keyData)
@@ -999,14 +1006,14 @@ func issueCert(kind, name, cn, email, keyPass, caPass, p12Pass string) ([]string
 
   // pkcs12
   out, err := runOpenSSL(nil,
-    map[string]string{envP12Pass: p12Pass, envUserPass: keyPass},
+    map[string]string{envP12Pass: p12Pass, envName: keyPass},
     "pkcs12", "-export", "-name", name,
     "-in", crtPath, "-inkey", keyPath,
     "-certfile", rootCertPath(),
     // the bundle carries the private key: strong KDF and MAC, like
     // the encrypted key files
     "-iter", "600000", "-macalg", "sha256",
-    "-passout", "env:"+envP12Pass, "-passin", "env:"+envUserPass)
+    "-passout", "env:"+envP12Pass, "-passin", "env:"+envName)
   if err != nil {
     return logs, errors.New("cannot export the PKCS#12 bundle.\n\nSee 'logs/ca-go.log' in the CA directory for details")
   }
@@ -1040,17 +1047,17 @@ func validName(s string) bool {
   return true
 }
 
-func IssueServer(fqdn, caPass, p12Pass string) ([]string, error) {
+func IssueServer(fqdn, keyPass, caPass, p12Pass string) ([]string, error) {
   if strings.TrimSpace(fqdn) == "" {
     return nil, errors.New("fqdn must not be empty")
   }
   if !validName(fqdn) {
     return nil, errors.New("fqdn must only contain letters, digits, '.', '-' and '_'")
   }
-  // server keys are written unencrypted and parsed directly, so
-  // keyPass stays empty; it is only forwarded as the p12 export's key
-  // password
-  return issueCert("server", fqdn, fqdn, "", "", caPass, p12Pass)
+  // an empty keyPass writes the server key unencrypted; a non-empty
+  // one encrypts it like a user key. keyPass is also forwarded as the
+  // p12 export's key password.
+  return issueCert("server", fqdn, fqdn, "", keyPass, caPass, p12Pass)
 }
 
 func IssueUser(cn, email, userPass, caPass, p12Pass string) ([]string, error) {

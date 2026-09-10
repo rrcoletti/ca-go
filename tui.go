@@ -150,6 +150,8 @@ func (m model) startForm(act action) (tea.Model, tea.Cmd) {
     add("CA passphrase", "", true)
   case actServer:
     add("FQDN (e.g. host.example.com)", "", false)
+    add("Server key passphrase (empty = none)", "", true)
+    add("Confirm server key passphrase", "", true)
     add("CA passphrase", "", true)
     add("p12 export passphrase (empty = none)", "", true)
   case actUser:
@@ -239,9 +241,15 @@ func (m model) submitForm() (model, tea.Cmd) {
     m.errMsg = "passphrase must not be empty"
     return m, nil
   }
-  if act == actServer && vals[0] == "" {
-    m.errMsg = "fqdn must not be empty"
-    return m, nil
+  if act == actServer {
+    if vals[0] == "" {
+      m.errMsg = "fqdn must not be empty"
+      return m, nil
+    }
+    if vals[1] != vals[2] {
+      m.errMsg = "server key passphrases do not match"
+      return m, nil
+    }
   }
   if act == actSettings || act == actSetup {
     for i, label := range []string{"organization", "root CA CN"} {
@@ -310,7 +318,7 @@ func (m model) submitForm() (model, tea.Cmd) {
     case actCRL:
       lines, err = RegenerateCRL(vals[0])
     case actServer:
-      lines, err = IssueServer(vals[0], vals[1], vals[2])
+      lines, err = IssueServer(vals[0], vals[1], vals[3], vals[4])
     case actUser:
       lines, err = IssueUser(vals[0], vals[1], vals[2], vals[4], vals[5])
     }
