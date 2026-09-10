@@ -37,6 +37,7 @@ const (
   scrRunning
   scrResult
   scrList
+  scrConfirm
 )
 
 type action int
@@ -94,6 +95,7 @@ type model struct {
   pickIdx int
   lines   []string
   recs    []CertRecord // show screen: rendered per frame at m.width
+  moveFrom, moveTo string // pending CA move (settings dir change)
   errMsg  string
   width   int // terminal width, 0 until the first WindowSizeMsg
 }
@@ -262,17 +264,29 @@ func (m model) submitForm() (model, tea.Cmd) {
       m.errMsg = "directory must be an absolute path"
       return m, nil
     }
-    // Edit configuration only: if a CA already lives in the target
-    // directory, saving a different identity would desync config and
-    // certificates: refuse and alert
+    // Edit configuration only: the identity must match the CA wherever
+    // it currently lives; saving a different identity would desync
+    // config and certificates: refuse and alert
     if act == actSettings {
-      rootExists, err := exists(filepath.Join(vals[2], "ca-root/certs/root-ca.crt"))
+      oldDir := baseDir
+      moving := vals[2] != oldDir
+      oldRootExists, err := exists(filepath.Join(oldDir, "ca-root/certs/root-ca.crt"))
+      if err != nil {
+        m.errMsg = err.Error()
+        return m, nil
+      }
+      // when the CA will be moved, its identity lives in the old dir
+      checkDir := vals[2]
+      if moving && oldRootExists {
+        checkDir = oldDir
+      }
+      rootExists, err := exists(filepath.Join(checkDir, "ca-root/certs/root-ca.crt"))
       if err != nil {
         m.errMsg = err.Error()
         return m, nil
       }
       if rootExists {
-        _, bad := caIdentityMismatches(vals[2], vals[0], vals[1])
+        _, bad := caIdentityMismatches(checkDir, vals[0], vals[1])
         if len(bad) > 0 {
           msg := strings.Join([]string{
             "configuration NOT saved.",
@@ -287,13 +301,21 @@ func (m model) submitForm() (model, tea.Cmd) {
             "",
             "Check the values and try again, or, if you want a clean CA, remove the existing one manually:",
             "",
-            "  $ " + removeCommandFor(vals[2]),
+            "  $ " + removeCommandFor(checkDir),
           }, "\n")
           // shown on the result screen like every other warning
           m.screen = scrResult
           m.errMsg = msg
           return m, nil
         }
+      }
+      // the CA exists in the old dir and the dir is changing: offer to
+      // move the whole tree to the new location
+      if oldRootExists {
+        m.moveFrom, m.moveTo = oldDir, vals[2]
+        m.pickIdx = 0
+        m.screen = scrConfirm
+        return m, nil
       }
     }
     orgName, rootCN = vals[0], vals[1]
@@ -416,6 +438,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.recs = nil
         return m, nil
       }
+    case scrConfirm:
+      return m.updateConfirm(msg)
     }
   case doneMsg:
     m.screen = scrResult
@@ -616,6 +640,74 @@ func (m model) updatePick(msg tea.Msg) (tea.Model, tea.Cmd) {
   return m, nil
 }
 
+// updateConfirm handles the move-the-CA question shown when a
+// settings save changes the CA directory.
+func (m model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+  key, ok := msg.(tea.KeyMsg)
+  if !ok {
+    return m, nil
+  }
+  switch key.String() {
+  case "esc":
+    // back to the settings form, directory field focused
+    m.focus = 2
+    cmds := []tea.Cmd{}
+    for i := range m.fields {
+      if i == m.focus {
+        cmds = append(cmds, m.fields[i].input.Focus())
+      } else {
+        m.fields[i].input.Blur()
+      }
+    }
+    m.screen = scrForm
+    return m, tea.Batch(cmds...)
+  case "up", "k":
+    if m.pickIdx > 0 {
+      m.pickIdx--
+    }
+  case "down", "j":
+    if m.pickIdx < 1 {
+      m.pickIdx++
+    }
+  case "enter":
+    if m.pickIdx == 0 {
+      // yes: move the tree, then save the configuration
+      m.screen = scrRunning
+      return m, func() tea.Msg {
+        vals := m.formValues()
+        if err := MoveCA(m.moveFrom, m.moveTo); err != nil {
+          return doneMsg{err: err}
+        }
+        orgName, rootCN = vals[0], vals[1]
+        baseDir = m.moveTo
+        // after baseDir: the entry lands in the CA's new logs dir
+        appendLog("moved CA from " + m.moveFrom + " to " + m.moveTo)
+        if err := saveConf(); err != nil {
+          return doneMsg{err: err}
+        }
+        return doneMsg{lines: []string{
+          "CA moved to " + m.moveTo,
+          "",
+          "Configuration saved.",
+        }}
+      }
+    }
+    // no: keep the CA where it is, save the new location anyway
+    vals := m.formValues()
+    orgName, rootCN = vals[0], vals[1]
+    baseDir = m.moveTo
+    if err := saveConf(); err != nil {
+      m.screen = scrResult
+      m.errMsg = err.Error()
+      return m, nil
+    }
+    m.screen = scrResult
+    m.lines = []string{"Configuration saved."}
+    return m, nil
+  }
+  return m, nil
+}
+
 func (m model) renderForm() string {
   var b strings.Builder
   b.WriteString("\n")
@@ -680,6 +772,20 @@ func (m model) View() string {
     body = m.renderForm()
   case scrPick:
     body = m.renderPick()
+  case scrConfirm:
+    body = "\n"
+    body += "      Move the CA from\n        " + m.moveFrom + "\n      to\n        " + m.moveTo + "\n\n"
+    options := []string{"Yes, move it", "No, keep it where it is"}
+    for i, opt := range options {
+      cursor := "        "
+      style := normalStyle
+      if i == m.pickIdx {
+        cursor = "      > "
+        style = selectedStyle
+      }
+      body += style.Render(cursor+opt) + "\n"
+    }
+    body += "\n" + helpStyle.Render("  ↑/↓: select · Enter: confirm · Esc: back to the form")
   case scrRunning:
     body = "\n      Working..."
   case scrResult:

@@ -66,6 +66,9 @@ func main() {
 
   var err error
   switch args[0] {
+  case "help":
+    printHelp()
+    return
   case "version":
     fmt.Println(version)
     return
@@ -100,8 +103,7 @@ func main() {
     }
     return
   default:
-    fmt.Println("usage: ca-go [new-ca | server <fqdn> | user <cn> <email> |")
-    fmt.Println("             revoke-server <fqdn> | revoke-user <email> | crl | show | version]")
+    printHelp()
     os.Exit(2)
   }
   if err != nil {
@@ -114,4 +116,26 @@ func need(cond bool, msg string) {
     fmt.Fprintln(os.Stderr, msg)
     os.Exit(2)
   }
+}
+
+// printHelp lists every subcommand with its environment-variable
+// passwords, mirroring the README's CLI table.
+func printHelp() {
+  fmt.Println(`usage: ca-go <command>
+
+  ca-go                     start the TUI
+  ca-go new-ca              create the root CA
+  ca-go server <fqdn>       issue a server certificate
+  ca-go user <cn> <email>   issue a user certificate
+  ca-go revoke-server <fqdn>
+  ca-go revoke-user <email>
+  ca-go crl                 regenerate the CRL
+  ca-go show                list issued certificates
+  ca-go version
+
+Passwords are read from environment variables, never the command line:
+  CAGO_ROOT_PASS    CA passphrase (new-ca, server, user, revoke-*, crl)
+  CAGO_USER_PASS    user key passphrase (user)
+  CAGO_SERVER_PASS  server key passphrase (server, optional)
+  CAGO_P12_PASS     p12 export passphrase (server, user, optional)`)
 }

@@ -468,3 +468,126 @@ func TestShowErrorGoesToResultScreen(t *testing.T) {
     t.Fatalf("expected corrupt-state error, got %q", m.errMsg)
   }
 }
+
+// Changing the CA directory in Edit configuration must offer to move
+// the existing CA; answering yes relocates the tree and saves the conf.
+func TestSettingsDirChangeMovesCA(t *testing.T) {
+  t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+  t.Setenv("HOME", t.TempDir())
+  chdirCA(t)
+  if _, err := NewCA("rp"); err != nil {
+    t.Fatal(err)
+  }
+  oldDir := baseDir
+  newDir := filepath.Join(filepath.Dir(oldDir), "moved-ca")
+
+  m := openSettingsForm(t)
+  m.focus = 2 // submit on Enter only from the last field
+  m.fields[2].input.SetValue(newDir)
+  var next tea.Model
+  var cmd tea.Cmd
+  next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+  if m.screen != scrConfirm {
+    t.Fatalf("expected confirm screen, got %d (err: %s)", m.screen, m.errMsg)
+  }
+
+  next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // "Yes, move it"
+  m = next.(model)
+  done := cmd().(doneMsg)
+  next, _ = m.Update(done)
+  m = next.(model)
+  if m.screen != scrResult || m.errMsg != "" {
+    t.Fatalf("expected clean result, got screen=%d err=%s", m.screen, m.errMsg)
+  }
+  if ok, err := exists(filepath.Join(newDir, "ca-root/certs/root-ca.crt")); err != nil || !ok {
+    t.Fatal("root CA must exist in the new directory after the move")
+  }
+  if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+    t.Fatal("old directory must be gone after the move")
+  }
+  if baseDir != newDir {
+    t.Fatalf("baseDir = %q, want %q", baseDir, newDir)
+  }
+  p, _ := confPath()
+  data, _ := os.ReadFile(p)
+  if !strings.Contains(string(data), newDir) {
+    t.Fatal("conf file must contain the new directory")
+  }
+}
+
+// Answering no keeps the CA in the old directory but still saves the
+// new location.
+func TestSettingsDirChangeNoKeepsCA(t *testing.T) {
+  t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+  t.Setenv("HOME", t.TempDir())
+  chdirCA(t)
+  if _, err := NewCA("rp"); err != nil {
+    t.Fatal(err)
+  }
+  oldDir := baseDir
+  newDir := filepath.Join(t.TempDir(), "elsewhere")
+
+  m := openSettingsForm(t)
+  m.focus = 2 // submit on Enter only from the last field
+  m.fields[2].input.SetValue(newDir)
+  next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+  if m.screen != scrConfirm {
+    t.Fatalf("expected confirm screen, got %d", m.screen)
+  }
+  next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown}) // "No, keep it where it is"
+  m = next.(model)
+  next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+  if m.screen != scrResult || m.errMsg != "" {
+    t.Fatalf("expected clean result, got screen=%d err=%s", m.screen, m.errMsg)
+  }
+  if ok, err := exists(filepath.Join(oldDir, "ca-root/certs/root-ca.crt")); err != nil || !ok {
+    t.Fatal("CA must stay in the old directory after answering no")
+  }
+  if baseDir != newDir {
+    t.Fatalf("baseDir = %q, want %q", baseDir, newDir)
+  }
+}
+
+// With a CA in the old dir, an identity edit together with a dir change
+// must be checked against the CA that lives there, not the empty target.
+func TestSettingsDirChangeIdentityCheckedAgainstOldDir(t *testing.T) {
+  t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+  t.Setenv("HOME", t.TempDir())
+  chdirCA(t)
+  if _, err := NewCA("rp"); err != nil {
+    t.Fatal(err)
+  }
+  newDir := filepath.Join(t.TempDir(), "moved")
+
+  m := openSettingsForm(t)
+  m.focus = 2 // submit on Enter only from the last field
+  m.fields[0].input.SetValue("Wrong Org")
+  m.fields[2].input.SetValue(newDir)
+  next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+  if m.screen != scrResult || m.errMsg == "" {
+    t.Fatalf("expected mismatch refusal, got screen=%d err=%q", m.screen, m.errMsg)
+  }
+  if !strings.Contains(m.errMsg, "does not match") {
+    t.Fatalf("expected mismatch message, got: %q", m.errMsg)
+  }
+}
+
+// openSettingsForm opens Edit configuration with the fields prefilled.
+func openSettingsForm(t *testing.T) model {
+  t.Helper()
+  m := initialModel()
+  for i := 0; i < 7; i++ { // menu item 7 = Edit configuration
+    next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+    m = next.(model)
+  }
+  next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+  m = next.(model)
+  if m.screen != scrForm || m.action != actSettings {
+    t.Fatalf("expected settings form, got screen=%d", m.screen)
+  }
+  return m
+}

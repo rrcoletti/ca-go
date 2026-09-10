@@ -103,6 +103,37 @@ func caIdentityMismatches(dir, org, wantRootCN string) (*x509.Certificate, []str
   return root, bad
 }
 
+// MoveCA relocates the whole CA tree from oldDir to newDir with a
+// single os.Rename: atomic within one filesystem. The caller must
+// persist the new baseDir afterwards.
+func MoveCA(oldDir, newDir string) error {
+  if oldDir == newDir {
+    return nil
+  }
+  oldExists, err := exists(oldDir)
+  if err != nil {
+    return err
+  }
+  if !oldExists {
+    return nil // nothing to move
+  }
+  newExists, err := exists(newDir)
+  if err != nil {
+    return err
+  }
+  if newExists {
+    return fmt.Errorf("target %s already exists; move the CA manually", newDir)
+  }
+  if err := os.MkdirAll(filepath.Dir(newDir), 0700); err != nil {
+    return err
+  }
+  if err := os.Rename(oldDir, newDir); err != nil {
+    // cross-device renames fail; a homelab CA is small enough to copy
+    return fmt.Errorf("cannot move %s to %s (%v); move the directory manually and save the configuration again", oldDir, newDir, err)
+  }
+  return nil
+}
+
 // removeCommandFor returns the manual CA removal command for dir.
 func removeCommandFor(dir string) string {
   return "rm -rf '" + dir + "'/*"
