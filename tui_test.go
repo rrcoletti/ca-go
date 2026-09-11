@@ -166,8 +166,8 @@ func TestFirstRunSetup(t *testing.T) {
   if cmd != nil {
     t.Fatal("setup submit should not return a cmd")
   }
-  if m.screen != scrResult {
-    t.Fatalf("expected result screen, got %d (err: %s)", m.screen, m.errMsg)
+  if !m.modal || m.modalErr {
+    t.Fatalf("expected success overlay, got modal=%v err=%q", m.modal, m.errMsg)
   }
   if orgName != "Example" || rootCN != "Example Root CA" {
     t.Fatalf("identity not set: %q %q", orgName, rootCN)
@@ -211,8 +211,8 @@ func TestEditConfForm(t *testing.T) {
   }
   m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
   m = m2.(model)
-  if m.screen != scrResult {
-    t.Fatalf("expected result screen, got %d (err: %s)", m.screen, m.errMsg)
+  if !m.modal || m.modalErr {
+    t.Fatalf("expected success overlay, got modal=%v err=%q", m.modal, m.errMsg)
   }
   if orgName != "New Org" || rootCN != "New Root CA" {
     t.Fatalf("identity not updated: %q %q", orgName, rootCN)
@@ -258,9 +258,11 @@ func TestEditConfRefusesOnMismatch(t *testing.T) {
   m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
   m = m2.(model)
 
-  // the refusal is shown on the result screen like every other warning
-  if m.screen != scrResult {
-    t.Fatalf("expected result screen, got screen=%d err=%s", m.screen, m.errMsg)
+  // the refusal is shown as an overlay over the form, like every
+  // other warning
+  if !m.modal || !m.modalErr || m.screen != scrForm {
+    t.Fatalf("expected error overlay over the form, got screen=%d modal=%v err=%s",
+      m.screen, m.modal, m.errMsg)
   }
   if !strings.Contains(m.errMsg, "configuration NOT saved") || !strings.Contains(m.errMsg, "rm -rf") {
     t.Fatalf("missing refusal alert: %q", m.errMsg)
@@ -349,8 +351,8 @@ func TestRevokeListSeesTUIIssuance(t *testing.T) {
       m = m2.(model)
     }
   }
-  if m.screen != scrResult || m.errMsg != "" {
-    t.Fatalf("issuance failed: screen=%d err=%s", m.screen, m.errMsg)
+  if !m.modal || m.modalErr || m.errMsg != "" {
+    t.Fatalf("issuance failed: modal=%v err=%s", m.modal, m.errMsg)
   }
 
   // back to menu, open Revoke user certificate (menu item 5)
@@ -435,11 +437,11 @@ func TestResultScreenHasNoStaleList(t *testing.T) {
   next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
   m = next.(model)
 
-  if m.screen != scrResult {
-    t.Fatalf("expected result screen, got %d", m.screen)
+  if !m.modal || !m.modalErr {
+    t.Fatalf("expected error overlay, got modal=%v err=%q", m.modal, m.errMsg)
   }
   if len(m.lines) != 0 {
-    t.Fatalf("stale list leaked into result screen: %v", m.lines)
+    t.Fatalf("stale list leaked into the overlay: %v", m.lines)
   }
   if !strings.Contains(m.errMsg, "CA already exists") {
     t.Fatalf("expected CA-exists error, got %q", m.errMsg)
@@ -461,8 +463,8 @@ func TestShowErrorGoesToResultScreen(t *testing.T) {
   m.menuIdx = 6 // Show issued certificates
   next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
   m = next.(model)
-  if m.screen != scrResult {
-    t.Fatalf("expected result screen, got %d", m.screen)
+  if !m.modal || !m.modalErr {
+    t.Fatalf("expected error overlay, got modal=%v", m.modal)
   }
   if !strings.Contains(m.errMsg, "corrupt") {
     t.Fatalf("expected corrupt-state error, got %q", m.errMsg)
@@ -497,8 +499,8 @@ func TestSettingsDirChangeMovesCA(t *testing.T) {
   done := cmd().(doneMsg)
   next, _ = m.Update(done)
   m = next.(model)
-  if m.screen != scrResult || m.errMsg != "" {
-    t.Fatalf("expected clean result, got screen=%d err=%s", m.screen, m.errMsg)
+  if !m.modal || m.modalErr || m.errMsg != "" {
+    t.Fatalf("expected success overlay, got modal=%v err=%s", m.modal, m.errMsg)
   }
   if ok, err := exists(filepath.Join(newDir, "ca-root/certs/root-ca.crt")); err != nil || !ok {
     t.Fatal("root CA must exist in the new directory after the move")
@@ -540,8 +542,8 @@ func TestSettingsDirChangeNoKeepsCA(t *testing.T) {
   m = next.(model)
   next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
   m = next.(model)
-  if m.screen != scrResult || m.errMsg != "" {
-    t.Fatalf("expected clean result, got screen=%d err=%s", m.screen, m.errMsg)
+  if !m.modal || m.modalErr || m.errMsg != "" {
+    t.Fatalf("expected success overlay, got modal=%v err=%s", m.modal, m.errMsg)
   }
   if ok, err := exists(filepath.Join(oldDir, "ca-root/certs/root-ca.crt")); err != nil || !ok {
     t.Fatal("CA must stay in the old directory after answering no")
@@ -568,8 +570,8 @@ func TestSettingsDirChangeIdentityCheckedAgainstOldDir(t *testing.T) {
   m.fields[2].input.SetValue(newDir)
   next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
   m = next.(model)
-  if m.screen != scrResult || m.errMsg == "" {
-    t.Fatalf("expected mismatch refusal, got screen=%d err=%q", m.screen, m.errMsg)
+  if !m.modal || !m.modalErr || m.errMsg == "" {
+    t.Fatalf("expected mismatch overlay, got modal=%v err=%q", m.modal, m.errMsg)
   }
   if !strings.Contains(m.errMsg, "does not match") {
     t.Fatalf("expected mismatch message, got: %q", m.errMsg)
@@ -678,8 +680,8 @@ func TestSanityScreenFlow(t *testing.T) {
     t.Fatal("p12 file not rebuilt")
   }
   m3, _ := m2.Update(dm)
-  if m3.(model).screen != scrResult {
-    t.Fatalf("expected result screen after repair, got %d", m3.(model).screen)
+  if !m3.(model).modal || m3.(model).modalErr {
+    t.Fatalf("expected success overlay after repair, got %+v", m3.(model))
   }
 
   // the chain finding (now the only one) is preselected; Enter

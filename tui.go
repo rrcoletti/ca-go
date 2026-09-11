@@ -20,12 +20,14 @@ package main
 // Esc cancels a form or backs out of a screen; q or Esc on the menu quits.
 
 import (
+  "errors"
   "path/filepath"
   "strings"
 
   "github.com/charmbracelet/bubbles/textinput"
   tea "github.com/charmbracelet/bubbletea"
   "github.com/charmbracelet/lipgloss"
+  "github.com/charmbracelet/x/ansi"
 )
 
 type screen int
@@ -35,7 +37,6 @@ const (
   scrForm
   scrPick
   scrRunning
-  scrResult
   scrList
   scrConfirm
   scrSanity
@@ -105,6 +106,23 @@ type model struct {
   errMsg  string
   width   int // terminal size, 0 until the first WindowSizeMsg
   height  int
+  modal     bool   // result overlay open over the current screen
+  modalErr  bool   // the overlay shows an error
+  returnScr screen // screen an error overlay reopens on Enter
+}
+
+// showModal opens the result overlay. Success overlays sit over the
+// menu; error overlays reopen back (the screen the action was launched
+// from) so the filled-in form stays on screen for corrections.
+func (m *model) showModal(lines []string, err error, back screen) {
+  m.modal = true
+  m.modalErr = err != nil
+  m.returnScr = back
+  m.lines = lines
+  m.errMsg = ""
+  if err != nil {
+    m.errMsg = err.Error()
+  }
 }
 
 func initialModel() model {
@@ -183,9 +201,7 @@ func (m model) startForm(act action) (tea.Model, tea.Cmd) {
     }
     recs, err := ListIssued()
     if err != nil {
-      m.screen = scrResult
-      m.lines = nil
-      m.errMsg = err.Error()
+      m.showModal(nil, err, scrMenu)
       return m, nil
     }
     m.picks = nil
@@ -195,8 +211,7 @@ func (m model) startForm(act action) (tea.Model, tea.Cmd) {
       }
     }
     if len(m.picks) == 0 {
-      m.screen = scrResult
-      m.lines = []string{"No " + kind + " certificates to revoke."}
+      m.showModal([]string{"No " + kind + " certificates to revoke."}, nil, scrMenu)
       return m, nil
     }
     // always show the pick list, even for a single candidate: revoke is
@@ -320,9 +335,9 @@ func (m model) submitForm() (model, tea.Cmd) {
             "",
             "  $ " + removeCommandFor(checkDir),
           }, "\n")
-          // shown on the result screen like every other warning
-          m.screen = scrResult
-          m.errMsg = msg
+          // shown as an overlay like every other warning; Enter
+          // reopens the form with the values still in place
+          m.showModal(nil, errors.New(msg), scrForm)
           return m, nil
         }
       }
@@ -341,11 +356,11 @@ func (m model) submitForm() (model, tea.Cmd) {
       m.errMsg = err.Error()
       return m, nil
     }
-    m.screen = scrResult
-    m.lines = []string{"Configuration saved."}
+    m.showModal([]string{"Configuration saved."}, nil, scrMenu)
     return m, nil
   }
 
+  m.returnScr = scrForm
   m.screen = scrRunning
   m.errMsg = ""
   return m, func() tea.Msg {
@@ -387,6 +402,7 @@ func (m model) submitRevokePass() (model, tea.Cmd) {
   if m.action == actRevokeUser {
     kind = "user"
   }
+  m.returnScr = scrForm
   m.screen = scrRunning
   return m, func() tea.Msg {
     lines, err := Revoke(kind, name, vals[0])
@@ -440,6 +456,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     case "ctrl+c":
       return m, tea.Quit
     }
+    if m.modal {
+      // the overlay swallows everything except its close keys: Enter
+      // reopens the screen it belongs to (the form on errors, the
+      // menu on success), Esc and q behave the same
+      switch msg.String() {
+      case "enter", "esc", "q":
+        m.modal = false
+        m.lines = nil
+        m.errMsg = ""
+        if m.modalErr {
+          m.screen = m.returnScr
+          if len(m.fields) > 0 {
+            return m, m.fields[m.focus].input.Focus()
+          }
+          return m, nil
+        }
+        m.screen = scrMenu
+        m.sanity = nil
+        return m, nil
+      }
+      return m, nil
+    }
     switch m.screen {
     case scrMenu:
       return m.updateMenu(msg)
@@ -447,23 +485,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
       return m.updateForm(msg)
     case scrPick:
       return m.updatePick(msg)
-    case scrResult:
-      switch msg.String() {
-      case "enter", "esc", "q":
-        // a failed p12 repair returns to its passphrase form so the
-        // user can correct it and try again; everything else goes to
-        // the menu
-        if m.action == actSanityP12 && m.errMsg != "" && len(m.fields) > 0 {
-          m.screen = scrForm
-          m.lines = nil
-          m.errMsg = ""
-          return m, nil
-        }
-        m.screen = scrMenu
-        m.lines = nil
-        m.errMsg = ""
-        return m, nil
-      }
     case scrList:
       switch msg.String() {
       case "enter", "esc", "q":
@@ -478,10 +499,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
       return m.updateSanity(msg)
     }
   case doneMsg:
-    m.screen = scrResult
-    m.lines = msg.lines
+    // the screen behind the overlay stays until Enter: nothing
+    // changes before the user dismisses the result
     if msg.err != nil {
-      m.errMsg = msg.err.Error()
+      m.showModal(msg.lines, msg.err, m.returnScr)
+    } else {
+      m.showModal(msg.lines, nil, scrMenu)
     }
     return m, nil
   }
@@ -530,6 +553,7 @@ func (m model) updateSanity(msg tea.Msg) (tea.Model, tea.Cmd) {
       return m, textinput.Blink
     }
     if s.Kind == "chain" {
+      m.returnScr = scrSanity
       m.screen = scrRunning
       m.errMsg = ""
       return m, func() tea.Msg {
@@ -596,9 +620,7 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
     if act == actShow {
       recs, err := ListIssued()
       if err != nil {
-        m.screen = scrResult
-        m.lines = nil
-        m.errMsg = err.Error()
+        m.showModal(nil, err, scrMenu)
         return m, nil
       }
       m.lines = nil
@@ -635,15 +657,11 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
     if act == actNewCA {
       rootExists, err := exists(rootCertPath())
       if err != nil {
-        m.screen = scrResult
-        m.lines = nil
-        m.errMsg = err.Error()
+        m.showModal(nil, err, scrMenu)
         return m, nil
       }
       if rootExists {
-        m.screen = scrResult
-        m.lines = nil
-        m.errMsg = caExistsMessage(baseDir)
+        m.showModal(nil, errors.New(caExistsMessage(baseDir)), scrMenu)
         return m, nil
       }
     }
@@ -666,8 +684,11 @@ func (m model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
       }
       m.screen = scrMenu
       return m, nil
-    case "tab", "shift+tab", "down", "up":
-      // move focus
+    case "tab", "shift+tab":
+      // move focus. Up/down are deliberately NOT focus keys here:
+      // bubbletea coalesces fast-typed runes, so the literal word
+      // "up" or "down" typed into a field would arrive as one key
+      // message and be mistaken for an arrow key
       s := key.String()
       if s == "tab" || s == "down" {
         m.focus = (m.focus + 1) % len(m.fields)
@@ -711,8 +732,18 @@ func (m model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
     // only the focused field receives keystrokes; blur only hides the cursor
     if i == m.focus {
       var cmd tea.Cmd
-      m.fields[i].input, cmd = m.fields[i].input.Update(msg)
-      cmds = append(cmds, cmd)
+      // split coalesced runes: fast typing (and tmux send-keys) can
+      // deliver "up" as one runes message, which textinput's "up"
+      // suggestion binding swallows instead of inserting the letters
+      if k, isKey := msg.(tea.KeyMsg); isKey && k.Type == tea.KeyRunes && len(k.Runes) > 1 {
+        for _, r := range k.Runes {
+          m.fields[i].input, cmd = m.fields[i].input.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+          cmds = append(cmds, cmd)
+        }
+      } else {
+        m.fields[i].input, cmd = m.fields[i].input.Update(msg)
+        cmds = append(cmds, cmd)
+      }
     }
   }
   return m, tea.Batch(cmds...)
@@ -803,12 +834,10 @@ func (m model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
     orgName, rootCN = vals[0], vals[1]
     baseDir = m.moveTo
     if err := saveConf(); err != nil {
-      m.screen = scrResult
-      m.errMsg = err.Error()
+      m.showModal(nil, err, scrConfirm)
       return m, nil
     }
-    m.screen = scrResult
-    m.lines = []string{"Configuration saved."}
+    m.showModal([]string{"Configuration saved."}, nil, scrMenu)
     return m, nil
   }
   return m, nil
@@ -822,14 +851,14 @@ func (m model) renderForm() string {
     if i > 0 {
       b.WriteString("\n")
     }
-    b.WriteString("  " + f.label + ":\n")
-    b.WriteString("  " + f.input.View() + "\n")
+    b.WriteString(f.label + ":\n")
+    b.WriteString(f.input.View() + "\n")
   }
-  if m.errMsg != "" {
+  if m.errMsg != "" && !m.modal {
     // indent and word-wrap every line: error text may span multiple
     // lines, and bubbletea truncates anything wider than the terminal
     for _, line := range strings.Split(wrapText(m.errMsg, m.innerWidth()), "\n") {
-      b.WriteString(errorStyle.Render("  "+line) + "\n")
+      b.WriteString(errorStyle.Render(line) + "\n")
     }
     b.WriteString("\n")
   }
@@ -842,7 +871,7 @@ func (m model) renderPick() string {
   if m.action == actRevokeUser {
     kind = "User"
   }
-  b.WriteString("  " + kind + " certificates:\n\n")
+  b.WriteString(kind + " certificates:\n\n")
   for i, p := range m.picks {
     line := "  " + p
     if i == m.pickIdx {
@@ -883,8 +912,12 @@ func (m model) pickRow(line string, selected bool) string {
 
 // frame lays out the full-window screen: header line, a rounded
 // bordered pane filling the terminal, then expiry notices and the help
-// line below the pane.
+// line below the pane. With the modal open the help line is the
+// modal's close hint, not the screen underneath.
 func (m model) frame(content, help string) string {
+  if m.modal {
+    help = " Enter: continue"
+  }
   w := m.width
   if w == 0 {
     w = 80
@@ -957,7 +990,7 @@ func (m model) body() (string, string) {
     return m.renderPick(), " ↑/↓: select · Enter: revoke · Esc: cancel"
   case scrSanity:
     var b strings.Builder
-    b.WriteString("  CA sanity check found problems:\n\n")
+    b.WriteString("CA sanity check found problems:\n\n")
     for i, s := range m.sanity {
       text := s.Msg
       switch s.Kind {
@@ -978,7 +1011,7 @@ func (m model) body() (string, string) {
     return b.String(), " ↑/↓: select · y: fix · N or Enter: skip · Esc or q: continue"
   case scrConfirm:
     var b strings.Builder
-    b.WriteString("  Move the CA from\n    " + m.moveFrom + "\n  to\n    " + m.moveTo + "\n\n")
+    b.WriteString("Move the CA from\n  " + m.moveFrom + "\nto\n  " + m.moveTo + "\n\n")
     options := []string{"Yes, move it", "No, keep it where it is"}
     for i, opt := range options {
       line := "  " + opt
@@ -989,34 +1022,7 @@ func (m model) body() (string, string) {
     }
     return b.String(), " ↑/↓: select · Enter: confirm · Esc: back to the form"
   case scrRunning:
-    return "  Working...", ""
-  case scrResult:
-    var b strings.Builder
-    for _, l := range m.lines {
-      // informational notices ("No server certificates to revoke.")
-      // render plain; the rest are successes
-      style := okStyle
-      if strings.HasPrefix(l, "No ") {
-        style = normalStyle
-      }
-      for _, line := range strings.Split(wrapText(l, m.innerWidth()), "\n") {
-        b.WriteString("  " + style.Render(line) + "\n")
-      }
-    }
-    if m.errMsg != "" {
-      if len(m.lines) > 0 {
-        b.WriteString("\n")
-      }
-      errText := wrapText("ERROR: "+m.errMsg, m.innerWidth())
-      for _, line := range strings.Split(errText, "\n") {
-        b.WriteString("  " + errorStyle.Render(line) + "\n")
-      }
-    }
-    help := " Enter or q: back to menu"
-    if m.action == actSanityP12 && m.errMsg != "" && len(m.fields) > 0 {
-      help = " Enter or q: back to the repair form"
-    }
-    return b.String(), help
+    return "Working...", ""
   case scrList:
     lines := m.lines
     if m.recs != nil {
@@ -1067,7 +1073,78 @@ func (m model) body() (string, string) {
   return "", ""
 }
 
+// modalView renders the result overlay centered over the screen behind
+// it (gp-go-style modal): issuance and repair output on success, the
+// error in red otherwise, with the close hint at the bottom. Errors
+// keep a red border so the kind is visible at a glance.
+func (m model) modalView(bg string) string {
+  w := m.width - 12
+  if m.width == 0 {
+    w = 60
+  }
+  if w < 30 {
+    w = 30
+  }
+  var lines []string
+  if m.modalErr {
+    for _, l := range strings.Split(wrapText("ERROR: "+m.errMsg, w), "\n") {
+      lines = append(lines, errorStyle.Render(l))
+    }
+  } else {
+    for _, l := range m.lines {
+      // informational notices ("No server certificates to revoke.")
+      // render plain; the rest are successes
+      style := okStyle
+      if strings.HasPrefix(l, "No ") {
+        style = normalStyle
+      }
+      for _, cl := range strings.Split(wrapText(l, w), "\n") {
+        lines = append(lines, style.Render(cl))
+      }
+    }
+  }
+  lines = append(lines, "", helpStyle.Render("Enter: continue"))
+  border := boxStyle
+  if m.modalErr {
+    border = border.BorderForeground(lipgloss.Color("196"))
+  }
+  box := border.Render(strings.Join(lines, "\n"))
+  return overlayCenter(bg, box, m.width)
+}
+
+// overlayCenter stamps box centered over bg. Stamping is ANSI-aware:
+// styled bg lines are cut with x/ansi so escape sequences survive.
+func overlayCenter(bg, box string, termW int) string {
+  bgW := lipgloss.Width(bg)
+  if termW > 0 && termW < bgW {
+    bgW = termW
+  }
+  x := (bgW - lipgloss.Width(box)) / 2
+  y := (lipgloss.Height(bg) - lipgloss.Height(box)) / 2
+  if x < 0 {
+    x = 0
+  }
+  if y < 0 {
+    y = 0
+  }
+  bgLines := strings.Split(bg, "\n")
+  boxLines := strings.Split(box, "\n")
+  for i, b := range boxLines {
+    by := y + i
+    if by < 0 || by >= len(bgLines) {
+      continue
+    }
+    left := ansi.Truncate(bgLines[by], x, "")
+    bgLines[by] = left + b + ansi.TruncateLeft(bgLines[by], x+lipgloss.Width(b), "")
+  }
+  return strings.Join(bgLines, "\n")
+}
+
 func (m model) View() string {
   content, help := m.body()
-  return m.frame(content, help)
+  base := m.frame(content, help)
+  if !m.modal {
+    return base
+  }
+  return m.modalView(base)
 }
