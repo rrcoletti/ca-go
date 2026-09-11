@@ -1171,18 +1171,19 @@ func truncateName(s string, width int) string {
   return string(r[:width-1]) + "…"
 }
 
-// recordWidths splits the two name columns for a terminal of the
-// given width. Fixed columns (Type, date, status) plus separators and
-// the 6-space content indent leave the rest for Common Name and
-// FQDN/Email, split 50/50. The budget keeps a 2-column right margin
-// even for the widest status token, EXPIRING. Width 0 (CLI without a
-// terminal) keeps the classic 28/20 layout; very narrow terminals
-// floor at 8.
+// recordWidths splits the two name columns for a content width of
+// termWidth (the pane's inner width in the TUI, terminal minus the two
+// border columns; 0 keeps the classic 28/20 CLI layout). Fixed columns
+// (Type, date, status) plus separators leave the rest for Common Name
+// and FQDN/Email, split 50/50. The split makes a row with the widest
+// status token, EXPIRING (8 chars), fill the width exactly, flush
+// against the border on both sides; narrower statuses leave the
+// difference free. Very narrow widths floor at 8.
 func recordWidths(termWidth int) (cnW, fqdnW int) {
   if termWidth <= 0 {
     return 28, 20
   }
-  avail := termWidth - 6 - 30
+  avail := termWidth - 28
   if avail < 16 {
     return 8, 8
   }

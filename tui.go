@@ -70,6 +70,7 @@ var menuItems = []string{
 
 var (
   titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255"))
+  boxStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("238"))
   selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
   normalStyle   = lipgloss.NewStyle()
   errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
@@ -102,7 +103,8 @@ type model struct {
   sanity  []SanityIssue // startup sanity check findings
   sanIdx  int           // selected finding on the sanity screen
   errMsg  string
-  width   int // terminal width, 0 until the first WindowSizeMsg
+  width   int // terminal size, 0 until the first WindowSizeMsg
+  height  int
 }
 
 func initialModel() model {
@@ -431,6 +433,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
   switch msg := msg.(type) {
   case tea.WindowSizeMsg:
     m.width = msg.Width
+    m.height = msg.Height
     return m, nil
   case tea.KeyMsg:
     switch msg.String() {
@@ -813,52 +816,92 @@ func (m model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) renderForm() string {
   var b strings.Builder
-  b.WriteString("\n")
   for i, f := range m.fields {
     // blank line between fields, none after the last: the footer
     // owns the spacing before the warnings/help lines
     if i > 0 {
       b.WriteString("\n")
     }
-    b.WriteString("      " + f.label + ":\n")
-    b.WriteString("      " + f.input.View() + "\n")
+    b.WriteString("  " + f.label + ":\n")
+    b.WriteString("  " + f.input.View() + "\n")
   }
   if m.errMsg != "" {
     // indent and word-wrap every line: error text may span multiple
     // lines, and bubbletea truncates anything wider than the terminal
-    for _, line := range strings.Split(wrapText(m.errMsg, m.width-6), "\n") {
-      b.WriteString(errorStyle.Render("      "+line) + "\n")
+    for _, line := range strings.Split(wrapText(m.errMsg, m.innerWidth()), "\n") {
+      b.WriteString(errorStyle.Render("  "+line) + "\n")
     }
     b.WriteString("\n")
   }
-  b.WriteString(m.footer("  Enter: next/submit · Tab: next field · Esc: cancel"))
   return b.String()
 }
 
 func (m model) renderPick() string {
   var b strings.Builder
-  b.WriteString("\n")
   kind := "Server"
   if m.action == actRevokeUser {
     kind = "User"
   }
-  b.WriteString("      " + kind + " certificates:\n\n")
+  b.WriteString("  " + kind + " certificates:\n\n")
   for i, p := range m.picks {
-    cursor := "        "
-    style := normalStyle
+    line := "  " + p
     if i == m.pickIdx {
-      cursor = "      > "
-      style = selectedStyle
+      line = "> " + p
     }
-    b.WriteString(style.Render(cursor+p) + "\n")
+    b.WriteString(m.pickRow(line, i == m.pickIdx) + "\n")
   }
-  b.WriteString(m.footer("  ↑/↓: select · Enter: revoke · Esc: cancel"))
   return b.String()
 }
 
-// frame renders the title and the screen content.
-func (m model) frame(content string) string {
-  return "  " + titleStyle.Render("ca-go "+version) + "\n\n" + content
+// innerWidth is the usable text width inside the bordered pane.
+func (m model) innerWidth() int {
+  w := m.width - 6 // 2 border columns + 2-space padding on each side
+  if m.width == 0 {
+    w = 74
+  }
+  if w < 20 {
+    w = 20
+  }
+  return w
+}
+
+// pickRow renders one selectable row; selected rows are highlighted
+// across the full pane width, gp-go style.
+func (m model) pickRow(line string, selected bool) string {
+  w := m.width - 2 // inner box width
+  if m.width == 0 {
+    w = 78
+  }
+  for lipgloss.Width(line) < w {
+    line += " "
+  }
+  if selected {
+    return selectedStyle.Render(line)
+  }
+  return line
+}
+
+// frame lays out the full-window screen: header line, a rounded
+// bordered pane filling the terminal, then expiry notices and the help
+// line below the pane.
+func (m model) frame(content, help string) string {
+  w := m.width
+  if w == 0 {
+    w = 80
+  }
+  if w < 20 {
+    w = 20
+  }
+  foot := m.footer(help)
+  h := m.height - 4 - strings.Count(foot, "\n") - 1 // header + blank + 2 border rows
+  if m.height == 0 {
+    h = 19
+  }
+  if h < 3 {
+    h = 3
+  }
+  box := boxStyle.Width(w-2).Height(h).Render(content)
+  return titleStyle.Render(" ca-go "+version) + "\n\n" + box + "\n" + foot
 }
 
 // expiryWarnings loads the certificate list and derives the expiry
@@ -885,40 +928,36 @@ func (m model) footer(help string) string {
     if strings.HasPrefix(w, "EXPIRING") {
       style = warnStyle
     }
-    for _, line := range strings.Split(wrapText(w, m.width-6), "\n") {
-      s += "\n" + style.Render("      " + line)
+    for _, line := range strings.Split(wrapText(w, m.innerWidth()), "\n") {
+      s += "\n" + style.Render(" "+line)
     }
   }
   if s != "" {
-    s = s + "\n"
+    s += "\n"
   }
-  if help != "" {
-    s += "\n" + helpStyle.Render(help)
-  }
-  return s
+  return s + helpStyle.Render(help)
 }
 
-func (m model) View() string {
-  body := ""
+// body returns the screen's content and its footer help line.
+func (m model) body() (string, string) {
   switch m.screen {
   case scrMenu:
-    body = "\n"
+    var b strings.Builder
     for i, item := range menuItems {
-      cursor := "      "
-      style := normalStyle
+      line := "  " + item
       if i == m.menuIdx {
-        cursor = "    > "
-        style = selectedStyle
+        line = "> " + item
       }
-      body += style.Render(cursor+item) + "\n"
+      b.WriteString(m.pickRow(line, i == m.menuIdx) + "\n")
     }
-    body += m.footer("  ↑/↓ or j/k: move · Enter: select · q or Esc: quit")
+    return b.String(), " ↑/↓ or j/k: move · Enter: select · q or Esc: quit"
   case scrForm:
-    body = m.renderForm()
+    return m.renderForm(), " Enter: next/submit · Tab: next field · Esc: cancel"
   case scrPick:
-    body = m.renderPick()
+    return m.renderPick(), " ↑/↓: select · Enter: revoke · Esc: cancel"
   case scrSanity:
-    body = "\n      CA sanity check found problems:\n\n"
+    var b strings.Builder
+    b.WriteString("  CA sanity check found problems:\n\n")
     for i, s := range m.sanity {
       text := s.Msg
       switch s.Kind {
@@ -930,33 +969,29 @@ func (m model) View() string {
       default:
         text += "  (manual)"
       }
-      cursor := "        "
-      style := normalStyle
+      line := "  " + text
       if i == m.sanIdx {
-        cursor = "      > "
-        style = selectedStyle
+        line = "> " + text
       }
-      body += style.Render(cursor+text) + "\n"
+      b.WriteString(m.pickRow(line, i == m.sanIdx) + "\n")
     }
-    body += m.footer("  ↑/↓: select · y: fix · N or Enter: skip · Esc or q: continue")
+    return b.String(), " ↑/↓: select · y: fix · N or Enter: skip · Esc or q: continue"
   case scrConfirm:
-    body = "\n"
-    body += "      Move the CA from\n        " + m.moveFrom + "\n      to\n        " + m.moveTo + "\n\n"
+    var b strings.Builder
+    b.WriteString("  Move the CA from\n    " + m.moveFrom + "\n  to\n    " + m.moveTo + "\n\n")
     options := []string{"Yes, move it", "No, keep it where it is"}
     for i, opt := range options {
-      cursor := "        "
-      style := normalStyle
+      line := "  " + opt
       if i == m.pickIdx {
-        cursor = "      > "
-        style = selectedStyle
+        line = "> " + opt
       }
-      body += style.Render(cursor+opt) + "\n"
+      b.WriteString(m.pickRow(line, i == m.pickIdx) + "\n")
     }
-    body += m.footer("  ↑/↓: select · Enter: confirm · Esc: back to the form")
+    return b.String(), " ↑/↓: select · Enter: confirm · Esc: back to the form"
   case scrRunning:
-    body = "\n      Working..."
+    return "  Working...", ""
   case scrResult:
-    body = "\n"
+    var b strings.Builder
     for _, l := range m.lines {
       // informational notices ("No server certificates to revoke.")
       // render plain; the rest are successes
@@ -964,49 +999,49 @@ func (m model) View() string {
       if strings.HasPrefix(l, "No ") {
         style = normalStyle
       }
-      for _, line := range strings.Split(wrapText(l, m.width-6), "\n") {
-        body += "      " + style.Render(line) + "\n"
+      for _, line := range strings.Split(wrapText(l, m.innerWidth()), "\n") {
+        b.WriteString("  " + style.Render(line) + "\n")
       }
     }
     if m.errMsg != "" {
       if len(m.lines) > 0 {
-        body += "\n"
+        b.WriteString("\n")
       }
-      errText := wrapText("ERROR: "+m.errMsg, m.width-6)
+      errText := wrapText("ERROR: "+m.errMsg, m.innerWidth())
       for _, line := range strings.Split(errText, "\n") {
-        body += "      " + errorStyle.Render(line) + "\n"
+        b.WriteString("  " + errorStyle.Render(line) + "\n")
       }
     }
-    help := "  Enter or q: back to menu"
+    help := " Enter or q: back to menu"
     if m.action == actSanityP12 && m.errMsg != "" && len(m.fields) > 0 {
-      help = "  Enter or q: back to the repair form"
+      help = " Enter or q: back to the repair form"
     }
-    body += m.footer(help)
+    return b.String(), help
   case scrList:
-    body = "\n"
     lines := m.lines
     if m.recs != nil {
       // re-rendered every frame: a resize reshapes the table live
       if len(m.recs) == 0 {
         lines = []string{"No certificates issued yet."}
       } else {
-        lines = []string{formatRecordHeader(m.width)}
+        lines = []string{formatRecordHeader(m.width - 2)}
         for _, r := range m.recs {
-          lines = append(lines, formatRecord(r, m.width))
+          lines = append(lines, formatRecord(r, m.width-2))
         }
       }
     }
+    var b strings.Builder
     for _, l := range lines {
       // revoked rows: the whole line red, as they have always been
       allRed := strings.Contains(l, "REVOKED")
-      for _, line := range strings.Split(wrapText(l, m.width-6), "\n") {
+      for _, line := range strings.Split(wrapText(l, m.width-2), "\n") {
         // other rows render plain except the trailing status token:
         // Valid green, EXPIRING yellow, EXPIRED red
         if strings.HasPrefix(l, "WARNING") {
           continue // notices come from the shared footer, once per screen
         }
         if allRed {
-          body += "      " + errorStyle.Render(line) + "\n"
+          b.WriteString(errorStyle.Render(line) + "\n")
           continue
         }
         text, st := line, ""
@@ -1024,10 +1059,15 @@ func (m model) View() string {
         if st != "" {
           out += " " + tokenStyle.Render(st)
         }
-        body += "      " + out + "\n"
+        b.WriteString(out + "\n")
       }
     }
-    body += m.footer("  Enter or q: back to menu")
+    return b.String(), " Enter or q: back to menu"
   }
-  return m.frame(body)
+  return "", ""
+}
+
+func (m model) View() string {
+  content, help := m.body()
+  return m.frame(content, help)
 }

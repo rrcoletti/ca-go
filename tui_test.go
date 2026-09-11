@@ -647,11 +647,11 @@ func TestSanityScreenFlow(t *testing.T) {
       continue
     }
     plain := strings.ReplaceAll(l, "\x1b", "")
-    if strings.HasPrefix(strings.TrimLeft(plain, " "), ">") {
-      if !strings.HasPrefix(plain, "      > ") {
+    if strings.HasPrefix(strings.TrimLeft(plain, "│ "), ">") {
+      if !strings.HasPrefix(plain, "│> ") {
         t.Errorf("selected row not at the common column: %q", plain)
       }
-    } else if !strings.HasPrefix(plain, "        ") {
+    } else if !strings.HasPrefix(plain, "│  ") {
       t.Errorf("unselected row not at the common column: %q", plain)
     }
   }
