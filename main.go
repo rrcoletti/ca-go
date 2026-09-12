@@ -83,7 +83,6 @@ func main() {
     return
   }
 
-  reportSanity()
   var err error
   switch args[0] {
   case "help":
@@ -92,6 +91,12 @@ func main() {
   case "version":
     fmt.Println(version)
     return
+  }
+
+  // sanity findings are noise for help/version; real commands surface
+  // them before doing their work
+  reportSanity()
+  switch args[0] {
   case "new-ca":
     _, err = NewCA(os.Getenv(envRootPass))
   case "server":
