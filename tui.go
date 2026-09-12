@@ -962,24 +962,20 @@ func (m model) expiryWarnings() []string {
 
 // footer appends the expiry notices and then the screen's help line
 // (empty for none). EXPIRING lines render yellow, EXPIRED lines red;
-// the layout with notices present is: main text, one empty line,
-// notices, one empty line, help line; without, just the help line
-// as before.
+// without notices the footer is just the help line as before.
 func (m model) footer(help string) string {
-  s := ""
+  var lines []string
   for _, w := range m.expiryWarnings() {
     style := errorStyle
     if strings.HasPrefix(w, "EXPIRING") {
       style = warnStyle
     }
     for _, line := range strings.Split(wrapText(w, m.innerWidth()), "\n") {
-      s += "\n" + style.Render(" "+line)
+      lines = append(lines, style.Render(" "+line))
     }
   }
-  if s != "" {
-    s += "\n"
-  }
-  return s + helpStyle.Render(help)
+  lines = append(lines, helpStyle.Render(help))
+  return strings.Join(lines, "\n")
 }
 
 // body returns the screen's content and its footer help line.
