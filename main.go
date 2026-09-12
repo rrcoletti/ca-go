@@ -44,7 +44,7 @@ import (
   tea "github.com/charmbracelet/bubbletea"
 )
 
-var version = "v1.1.0"
+var version = "v1.1.1"
 
 func fail(err error) {
   fmt.Fprintln(os.Stderr, "ERROR:", err)
