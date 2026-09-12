@@ -672,8 +672,35 @@ func (m model) updateMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
   return m, nil
 }
 
+// moveFocus moves form field focus by delta, wrapping around, and
+// clears any stale error message.
+func (m *model) moveFocus(delta int) tea.Cmd {
+  m.focus = (m.focus + delta + len(m.fields)) % len(m.fields)
+  cmds := []tea.Cmd{}
+  for i := range m.fields {
+    if i == m.focus {
+      cmds = append(cmds, m.fields[i].input.Focus())
+    } else {
+      m.fields[i].input.Blur()
+    }
+  }
+  m.errMsg = ""
+  return tea.Batch(cmds...)
+}
+
 func (m model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
   if key, ok := msg.(tea.KeyMsg); ok {
+    // up/down move focus, matched on the key TYPE: bubbletea coalesces
+    // fast-typed runes (and tmux send-keys), so the literal word "up"
+    // or "down" typed into a field arrives as one KeyRunes message
+    // whose String() is also "up"/"down"; only true arrow keys have
+    // KeyType KeyUp/KeyDown, so typed words can never navigate here
+    if key.Type == tea.KeyUp || key.Type == tea.KeyDown {
+      if key.Type == tea.KeyDown {
+        return m, m.moveFocus(1)
+      }
+      return m, m.moveFocus(-1)
+    }
     switch key.String() {
     case "esc":
       m.errMsg = ""
@@ -685,26 +712,10 @@ func (m model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
       m.screen = scrMenu
       return m, nil
     case "tab", "shift+tab":
-      // move focus. Up/down are deliberately NOT focus keys here:
-      // bubbletea coalesces fast-typed runes, so the literal word
-      // "up" or "down" typed into a field would arrive as one key
-      // message and be mistaken for an arrow key
-      s := key.String()
-      if s == "tab" || s == "down" {
-        m.focus = (m.focus + 1) % len(m.fields)
-      } else {
-        m.focus = (m.focus - 1 + len(m.fields)) % len(m.fields)
+      if key.String() == "tab" {
+        return m, m.moveFocus(1)
       }
-      cmds := []tea.Cmd{}
-      for i := range m.fields {
-        if i == m.focus {
-          cmds = append(cmds, m.fields[i].input.Focus())
-        } else {
-          m.fields[i].input.Blur()
-        }
-      }
-      m.errMsg = ""
-      return m, tea.Batch(cmds...)
+      return m, m.moveFocus(-1)
     case "enter":
       // advance to next field; submit on last
       if m.focus < len(m.fields)-1 {
@@ -985,7 +996,7 @@ func (m model) body() (string, string) {
     }
     return b.String(), " ↑/↓ or j/k: move · Enter: select · q or Esc: quit"
   case scrForm:
-    return m.renderForm(), " Enter: next/submit · Tab: next field · Esc: cancel"
+    return m.renderForm(), " Enter: next/submit · Tab or ↑/↓: next field · Esc: cancel"
   case scrPick:
     return m.renderPick(), " ↑/↓: select · Enter: revoke · Esc: cancel"
   case scrSanity:
